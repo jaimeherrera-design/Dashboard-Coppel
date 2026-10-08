@@ -1,0 +1,24 @@
+# Entorno y cache
+.venv/
+.dashboard_cache/
+.drive_cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.csv_split_*/
+
+# Credenciales privadas
+.streamlit/secrets.toml
+*service-account*.json
+dashboard-coppel-*.json
+
+# Datos y respaldos
+*.csv
+*.parquet
+*.xlsx
+backups/
+Coppel_backup_*/
+
+# Exportaciones
+*.pptx
+*.log
