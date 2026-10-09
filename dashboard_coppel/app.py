@@ -17,7 +17,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.util import Inches, Pt
-from data_cache import load_summary, SUMMARY_KEYS
+from data_cache import load_summary, iter_summary, SUMMARY_KEYS
 from report_view import PLOT_CONFIG, render_report
 from detail_view import DETAIL_VERSION, numeric_code, phone_prefix, load_detail_masters, classify_detail, combine_groups, render_detail
 from outcome_view import render_outcomes
@@ -201,18 +201,19 @@ def discover_dashboard_files(root: Path) -> tuple[FileSignature, ...]:
 
 
 def read_file_chunks(path: Path, columns: list[str], *, detail: bool):
+    batch_size = min(CHUNK_SIZE, 50_000) if detail else CHUNK_SIZE
     if path.suffix.casefold() == ".parquet":
         with pq.ParquetFile(path) as reader:
             missing = set(columns).difference(reader.schema_arrow.names)
             if missing:
                 raise ValueError(f"Faltan columnas requeridas: {', '.join(sorted(missing))}")
-            for batch in reader.iter_batches(batch_size=CHUNK_SIZE, columns=columns):
+            for batch in reader.iter_batches(batch_size=batch_size, columns=columns):
                 yield batch.to_pandas()
     elif path.suffix.casefold() == ".csv":
         with pd.read_csv(
             path, sep=";", usecols=columns,
             dtype={"DDI": str, "Phone": str} if detail else None,
-            chunksize=CHUNK_SIZE, low_memory=False,
+            chunksize=batch_size, low_memory=False,
         ) as reader:
             yield from reader
     else:
@@ -321,16 +322,16 @@ def read_detail_summaries(files: tuple[FileSignature, ...], status=None):
             yield chunk.drop(columns="Phone")
 
     for signature in files:
-        summary = load_summary(
+        for summary in iter_summary(
             signature, lambda: chunks(signature), status,
             keys=SUMMARY_KEYS + ["DDI", "phone_prefix"],
             version=DETAIL_VERSION, namespace=DETAIL_VERSION,
-        )
-        summary["Call end"] = pd.to_datetime(summary["Call end"], errors="coerce")
-        yield summary
+        ):
+            summary["Call end"] = pd.to_datetime(summary["Call end"], errors="coerce")
+            yield summary
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def aggregate_detail(files: tuple[FileSignature, ...], contact_signature: FileSignature,
                      did_signature: FileSignature, lada_signature: FileSignature,
                      filters: dict, version: str = DETAIL_VERSION, _status=None) -> dict:
@@ -341,7 +342,7 @@ def aggregate_detail(files: tuple[FileSignature, ...], contact_signature: FileSi
         "did_campaign": ["did", "Campaign Name", "month"],
         "state": ["state"], "state_month": ["state", "month", "provider"],
     }
-    parts = {key: [] for key in dimensions}
+    groups = {key: pd.DataFrame(columns=group + GROUP_METRICS) for key, group in dimensions.items()}
     unmapped_did = unmapped_state = 0
     for chunk in read_detail_summaries(files, _status):
         if _status is not None:
@@ -354,9 +355,10 @@ def aggregate_detail(files: tuple[FileSignature, ...], contact_signature: FileSi
         unmapped_did += int(chunk.loc[chunk["did"].eq("Sin cruce"), "calls"].sum())
         unmapped_state += int(chunk.loc[chunk["state"].eq("Sin cruce"), "calls"].sum())
         for key, group in dimensions.items():
-            parts[key].append(chunk.groupby(group, as_index=False)[GROUP_METRICS].sum())
+            grouped = chunk.groupby(group, as_index=False)[GROUP_METRICS].sum()
+            groups[key] = grouped if groups[key].empty else combine_groups([groups[key], grouped], group)
     return {
-        **{key: combine_groups(parts[key], group) for key, group in dimensions.items()},
+        **groups,
         "unmapped_did": unmapped_did, "unmapped_state": unmapped_state,
     }
 

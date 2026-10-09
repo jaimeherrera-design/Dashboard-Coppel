@@ -53,21 +53,39 @@ Para incluir solo un intervalo de `Call end`, agregar `--start 2026-06-01 --end 
 
 Las sesiones concurrentes comparten los metadatos y serializan la preparacion de cada resumen dentro del servidor: una sola lectura construye la cache de una fuente y las demas esperan para reutilizarla. No reiniciar el servidor durante la primera preparacion, pues los resumenes solo se publican una vez completos.
 
-El detalle DID / Estado prepara su propio resumen la primera vez que se abre. Muestra el archivo y lote en proceso, la reutilizacion de resumenes y la agrupacion de resultados. Esta primera preparacion puede tardar varios minutos; las siguientes aperturas reutilizan la cache. Otras tareas de conversion o division comparten disco y CPU y pueden alargar esta preparacion.
+El detalle DID / Estado prepara su propio resumen diario la primera vez que se abre.
+Conserva dia, tipo, campana, motivo, resultado, DDI y prefijo; no necesita la hora
+para sus vistas mensuales ni para los filtros de dias completos. Lee los Parquet
+en lotes de hasta 50.000 registros y los resumenes SQLite en lotes de hasta 25.000,
+acumulando las cinco agrupaciones sin cargar un resumen completo en memoria.
+La cache del detalle es independiente de los resumenes horarios de las otras pestanas.
+Al actualizar desde la version anterior, se prepara una nueva cache del detalle una sola vez.
+Muestra el archivo y lote en proceso y reutiliza los resumenes intactos; la primera
+preparacion puede tardar varios minutos. Se conservan hasta dos resultados filtrados
+en la cache de memoria del detalle. Los cambios de maestros reclasifican sin releer
+Parquet intactos. Otras tareas de conversion o division comparten disco y CPU.
 
 ### Presentacion del detalle
 
 En **DETALLE DID / ESTADO**, un selector muestra solo una de las cinco tablas o graficos a la vez.
-Las tablas tienen una altura de 700 pixeles y dibujan hasta 100 filas visibles por pagina, conservando el orden y
-los controles de la jerarquia (padres e hijos pueden quedar en paginas distintas).
-La busqueda considera todas las filas; la descarga incluye la jerarquia completa
-que corresponde a la busqueda, incluso hijos contraidos y otras paginas.
+Las tablas tienen una altura de 700 pixeles, encabezados azules con fuente blanca
+y subtotales en negrilla, con 48 pixeles adicionales de sangria por nivel.
+Se muestran mediante HTML estatico sanitizado por Streamlit, sin JavaScript ni iframe.
+El servidor envia solo hasta 100 filas por pagina mas una fila de total general.
+Los controles ocupan dos filas: componente y una fila con busqueda, niveles, orden y pagina.
+El selector de niveles reemplaza la expansion individual
+de ramas; cada fila muestra su ruta completa para identificar padres e hijos entre paginas.
+La busqueda considera toda la jerarquia y conserva los antecesores de las coincidencias.
+Los controles **Ordenar por** y **Orden** ordenan hermanos antes de paginar.
+**Preparar CSV completo** genera bajo demanda la descarga de todos los niveles y
+paginas que corresponden a la busqueda, independientemente del nivel visible.
+La busqueda, los niveles y la paginacion se ejecutan en un fragmento de Streamlit,
+sin volver a ejecutar las otras pestanas ni sincronizar Drive por cada pagina.
 Los totales siguen calculandose sobre todas las filas base, sin cambiar filtros,
-fuentes, clasificacion, agregaciones ni cache.
+fuentes, clasificacion ni reglas de agregacion.
 
 La paginacion no se activa en otras pestanas.
-Esta presentacion reduce elementos del navegador, pero no reduce los datos enviados
-por cada tabla ni la preparacion inicial del resumen, y no garantiza solucionar
+Estas optimizaciones reducen la memoria y los datos enviados por tabla, pero no garantizan solucionar
 el error `removeChild` en Cloud; debe verificarse en el despliegue.
 
 - La primera carga prepara un resumen SQLite por Parquet descargado en su carpeta `.dashboard_cache`, dentro de `.drive_cache`. No modifica ni elimina las fuentes remotas ni los originales locales.

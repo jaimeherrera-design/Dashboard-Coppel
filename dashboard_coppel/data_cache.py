@@ -2,7 +2,7 @@ import hashlib
 import json
 import sqlite3
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import closing
 from pathlib import Path
 from threading import Lock, RLock
@@ -48,6 +48,53 @@ def _load_summary(
     version: str = SUMMARY_VERSION,
     namespace: str = "",
 ) -> pd.DataFrame:
+    cache = _prepare_summary(signature, chunks, status, keys=keys, version=version, namespace=namespace)
+    with closing(sqlite3.connect(cache)) as connection:
+        result = pd.read_sql_query("SELECT * FROM summary", connection)
+    if source_signature(Path(signature[0])) != signature:
+        raise ValueError(f"La fuente cambio durante la carga: {Path(signature[0]).name}. Recarga el dashboard.")
+    return result
+
+
+def iter_summary(
+    signature: FileSignature,
+    chunks: Callable[[], Iterable[pd.DataFrame]],
+    status=None,
+    *,
+    keys: list[str],
+    version: str,
+    namespace: str,
+    batch_size: int = 25_000,
+) -> Iterator[pd.DataFrame]:
+    if batch_size < 1:
+        raise ValueError("El tamano del lote del resumen debe ser positivo.")
+    lock_key = signature[0] + namespace
+    with _LOCKS_GUARD:
+        lock = _SUMMARY_LOCKS.setdefault(lock_key, RLock())
+    with lock:
+        cache = _prepare_summary(
+            signature, chunks, status, keys=keys, version=version,
+            namespace=namespace, date_format="%Y-%m-%d",
+        )
+        with closing(sqlite3.connect(cache)) as connection:
+            for batch in pd.read_sql_query("SELECT * FROM summary", connection, chunksize=batch_size):
+                if source_signature(Path(signature[0])) != signature:
+                    raise ValueError(f"La fuente cambio durante la carga: {Path(signature[0]).name}. Recarga el dashboard.")
+                yield batch
+        if source_signature(Path(signature[0])) != signature:
+            raise ValueError(f"La fuente cambio durante la carga: {Path(signature[0]).name}. Recarga el dashboard.")
+
+
+def _prepare_summary(
+    signature: FileSignature,
+    chunks: Callable[[], Iterable[pd.DataFrame]],
+    status=None,
+    *,
+    keys: list[str] | None = None,
+    version: str = SUMMARY_VERSION,
+    namespace: str = "",
+    date_format: str = "%Y-%m-%d %H:00:00",
+) -> Path:
     keys = SUMMARY_KEYS if keys is None else keys
     source = Path(signature[0])
     if source_signature(source) != signature:
@@ -63,10 +110,9 @@ def _load_summary(
             if stored is not None and stored[0] == identity:
                 if status is not None:
                     status.update(label=f"Usando resumen guardado: {source.name}", state="running")
-                result = pd.read_sql_query("SELECT * FROM summary", connection)
                 if source_signature(source) != signature:
                     raise ValueError(f"La fuente cambio durante la carga: {source.name}. Recarga el dashboard.")
-                return result
+                return cache
 
     columns = keys + SUMMARY_METRICS
     quoted_keys = ", ".join(f'"{name}"' for name in keys)
@@ -89,7 +135,7 @@ def _load_summary(
             connection.execute("CREATE TABLE metadata (identity TEXT NOT NULL)")
             for chunk in chunks():
                 chunk = chunk.copy()
-                chunk["Call end"] = chunk["Call end"].dt.strftime("%Y-%m-%d %H:00:00").fillna("")
+                chunk["Call end"] = chunk["Call end"].dt.strftime(date_format).fillna("")
                 grouped = chunk.groupby(keys, dropna=False).agg(
                     calls=("Talk Time", "size"),
                     talk_sum=("Talk Time", "sum"),
@@ -101,8 +147,7 @@ def _load_summary(
                 raise ValueError(f"La fuente cambio durante la carga: {source.name}. Recarga el dashboard.")
             connection.execute("INSERT INTO metadata VALUES (?)", (identity,))
             connection.commit()
-            result = pd.read_sql_query("SELECT * FROM summary", connection)
         temporary.replace(cache)
-        return result
+        return cache
     finally:
         temporary.unlink(missing_ok=True)

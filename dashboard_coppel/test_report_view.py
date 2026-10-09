@@ -164,7 +164,9 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
         self.assertFalse(ui.exception)
         self.assertFalse(ui.error)
         self.assertEqual(len(ui.tabs[1].get("plotly_chart")), 0)
-        self.assertEqual(len(ui.tabs[1].get("iframe")), 1)
+        self.assertEqual(len(ui.tabs[1].get("iframe")), 0)
+        self.assertEqual(len(ui.tabs[1].get("html")), 1)
+        self.assertEqual(ui.number_input[0].value, 1)
         self.assertEqual(len(ui.checkbox), 0)
         self.assertEqual(ui.selectbox(key="detail-render-section").value, "DID / Mes / Proveedor")
         detail_cards = [element.value for element in ui.markdown if 'class="kpi-card' in element.value]

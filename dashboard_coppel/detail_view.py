@@ -1,4 +1,5 @@
 from pathlib import Path
+from html import escape
 import re
 
 import pandas as pd
@@ -11,7 +12,7 @@ from interactive_table import render_interactive_table
 from report_view import BLUE, LIGHT_BLUE, GREEN, presentation_metrics, report_chart
 
 
-DETAIL_VERSION = "did-phone-prefix-v1"
+DETAIL_VERSION = "daily-did-phone-prefix-v2"
 METRICS = ["calls", "contacts", "talk_sum", "wrap_sum", "wait_sum"]
 UNMAPPED = "Sin cruce"
 
@@ -116,7 +117,133 @@ def detail_table(table: pd.DataFrame, dimensions: list[str], title: str, height:
     totals = presentation_metrics(pd.DataFrame([table[METRICS].sum()])).iloc[0].to_dict()
     totals["label"] = "Total"
     totals["rate"] *= 100
-    render_interactive_table(display, columns, title, height=height, hierarchy=True, totals=totals, page_size=page_size)
+    if page_size:
+        render_detail_page(display, columns, title, totals, height, page_size, len(dimensions))
+    else:
+        render_interactive_table(display, columns, title, height=height, hierarchy=True, totals=totals)
+
+
+def select_detail_rows(display: pd.DataFrame, query: str, depth: int, sort_key: str, ascending: bool) -> pd.DataFrame:
+    query = query.strip().casefold()
+    by_id = display.set_index("_id")
+    included = set()
+    if query:
+        searchable = ["label", "calls", "contacts", "rate", "tmo", "idle"]
+        matches = pd.Series(False, index=display.index)
+        for column in searchable:
+            matches |= display[column].astype(str).str.casefold().str.contains(query, regex=False)
+        for identifier in display.loc[matches, "_id"]:
+            while identifier:
+                included.add(identifier)
+                identifier = by_id.at[identifier, "_parent"]
+    children = {
+        parent: frame.sort_values(sort_key, ascending=ascending, kind="stable")
+        for parent, frame in display.groupby("_parent", sort=False)
+    }
+    identifiers = []
+
+    def visit(parent):
+        if parent not in children:
+            return
+        for _, row in children[parent].iterrows():
+            if (query and row["_id"] not in included) or (not query and row["_depth"] >= depth):
+                continue
+            identifiers.append(row["_id"])
+            visit(row["_id"])
+
+    visit("")
+    selected = by_id.loc[identifiers].reset_index()
+    paths = {}
+    for _, row in selected.iterrows():
+        parent_path = paths.get(row["_parent"], "")
+        paths[row["_id"]] = f"{parent_path} / {row['label']}" if parent_path else str(row["label"])
+    selected["label"] = selected["_id"].map(paths)
+    return selected
+
+
+def detail_csv(display: pd.DataFrame, columns: list[tuple[str, str]]) -> bytes:
+    export = display[[key for key, _ in columns]].copy()
+    for key in export.select_dtypes(include=["object", "string"]).columns:
+        export[key] = export[key].map(
+            lambda value: "'" + value if isinstance(value, str) and re.match(r"^[=+@\-\t\r]", value) else value
+        )
+    export.columns = [label for _, label in columns]
+    return export.to_csv(index=False, sep=";").encode("utf-8-sig")
+
+
+def detail_page_html(rows: pd.DataFrame, columns: list[tuple[str, str]],
+                     totals: dict, height: int, levels: int) -> str:
+    def cells(row, indent=0):
+        values = []
+        for key, _ in columns:
+            value = row[key]
+            if key == "label":
+                text = escape(str(value))
+            elif key in ["calls", "contacts"]:
+                text = f"{value:,.0f}"
+            elif key == "rate":
+                text = f"{value:.2f}%"
+            else:
+                text = f"{value:.1f}"
+            padding = f' style="padding-left:{16 + indent * 48}px"' if key == "label" else ""
+            values.append(f"<td{padding}>{text}</td>")
+        return "".join(values)
+
+    headers = "".join(f'<th scope="col">{escape(label)}</th>' for _, label in columns)
+    body = []
+    for _, row in rows.iterrows():
+        depth = int(row["_depth"])
+        row_class = "subtotal" if depth < levels - 1 else "detail-leaf"
+        body.append(f'<tr class="{row_class}">{cells(row, depth)}</tr>')
+    return (
+        '<style>'
+        '.coppel-detail-page{overflow:auto;border:1px solid #dbe6f0;border-radius:6px;background:white}'
+        '.coppel-detail-page table{border-collapse:separate;border-spacing:0;width:100%;font:14px Arial,sans-serif;color:#14375f}'
+        '.coppel-detail-page th{position:sticky;top:0;z-index:1;background:#23458f;color:#fff;padding:14px 16px;text-align:right;white-space:nowrap}'
+        '.coppel-detail-page td{padding:12px 16px;border-bottom:1px solid #edf1f6;text-align:right;white-space:nowrap}'
+        '.coppel-detail-page th:first-child,.coppel-detail-page td:first-child{text-align:left}'
+        '.coppel-detail-page .subtotal td{font-weight:700;background:#edf3fb}'
+        '.coppel-detail-page tbody tr:hover td{background:#e4eefb}'
+        '.coppel-detail-page tfoot td{position:sticky;bottom:0;background:#23458f;color:#fff;font-weight:700}'
+        '</style>'
+        f'<div class="coppel-detail-page" style="height:{height}px" tabindex="0" role="region" aria-label="Detalle paginado">'
+        f'<table><thead><tr>{headers}</tr></thead><tbody>{"".join(body)}</tbody>'
+        f'<tfoot><tr>{cells(totals)}</tr></tfoot></table></div>'
+    )
+
+
+@st.fragment
+def render_detail_page(display: pd.DataFrame, columns: list[tuple[str, str]], title: str,
+                       totals: dict, height: int, page_size: int, levels: int) -> None:
+    search_control, depth_control, sort_control, direction_control, page_control = st.columns([3, 1.5, 2, 2, 1])
+    with search_control:
+        query = st.text_input("Buscar en todo el detalle", key=f"{title}-search")
+    with depth_control:
+        depth = st.selectbox("Niveles de la jerarquía", range(1, levels + 1), index=min(1, levels - 1),
+                             key=f"{title}-depth")
+    with sort_control:
+        sort_key = st.selectbox("Ordenar por", [key for key, _ in columns],
+                                format_func=dict(columns).__getitem__, index=1, key=f"{title}-sort")
+    with direction_control:
+        direction = st.selectbox("Orden", ["Mayor a menor", "Menor a mayor"], key=f"{title}-direction")
+    selected = select_detail_rows(display, query, depth, sort_key, direction == "Menor a mayor")
+    page_count = max(1, (len(selected) + page_size - 1) // page_size)
+    context = (query, depth, sort_key, direction, len(display), totals)
+    context_key, page_key = f"{title}-context", f"{title}-page"
+    if st.session_state.get(context_key) != context:
+        st.session_state[page_key] = 1
+        st.session_state[context_key] = context
+    st.session_state[page_key] = min(st.session_state.get(page_key, 1), page_count)
+    with page_control:
+        page = st.number_input("Página", min_value=1, max_value=page_count, step=1, key=page_key)
+    st.caption(f"Página {page} de {page_count} · {len(selected):,} filas · Total general sin cambios")
+    page_rows = selected.iloc[(page - 1) * page_size:page * page_size]
+    st.html(detail_page_html(page_rows, columns, totals, height, levels))
+    if st.button("Preparar CSV completo", key=f"{title}-prepare-csv"):
+        export = select_detail_rows(display, query, levels, sort_key, direction == "Menor a mayor")
+        st.download_button("Descargar CSV completo", detail_csv(export, columns),
+                           file_name="Coppel_detalle.csv", mime="text/csv",
+                           key=f"{title}-download", on_click="ignore")
 
 
 def did_volume_figure(table: pd.DataFrame) -> go.Figure:
