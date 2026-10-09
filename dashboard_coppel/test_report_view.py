@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import pandas as pd
 from streamlit.testing.v1 import AppTest
@@ -122,7 +123,15 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
             self.row("2026-06-01 10:00:00", talk=2),
             self.row("2026-06-02 11:00:00", outcome="Busy", talk=6),
         ])
-        with patch.object(app, "DATA_ROOT", self.root), patch.object(app, "CONTACT_MAPPING_FILE", self.mapping), patch.object(app, "DID_MAPPING_FILE", self.did_mapping), patch.object(app, "LADA_MAPPING_FILE", self.lada_mapping):
+        sources = SimpleNamespace(
+            parquet=app.discover_csv_files(self.root),
+            masters={
+                "Mae_contacto.xlsx": app.file_signature(self.mapping),
+                "Mae_did.xlsx": app.file_signature(self.did_mapping),
+                "Mae_lada.xlsx": app.file_signature(self.lada_mapping),
+            },
+        )
+        with patch.object(app, "DATA_ROOT", self.root), patch.object(app, "discover_drive_sources", return_value=sources):
             ui = AppTest.from_string("import app\napp.main()", default_timeout=30).run()
         self.assertFalse(ui.exception)
         self.assertFalse(ui.error)
@@ -149,13 +158,17 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
         self.assertEqual(len(ui.tabs[0].get("iframe")), 2)
         self.assertEqual(len(ui.tabs[1].get("iframe")), 0)
         self.assertTrue(any("DÍA DEL MES Y HORA" in item.value for item in ui.markdown))
-        with patch.object(app, "DATA_ROOT", self.root), patch.object(app, "CONTACT_MAPPING_FILE", self.mapping), patch.object(app, "DID_MAPPING_FILE", self.did_mapping), patch.object(app, "LADA_MAPPING_FILE", self.lada_mapping):
+        with patch.object(app, "DATA_ROOT", self.root), patch.object(app, "discover_drive_sources", return_value=sources):
             ui.session_state["dashboard-pages"] = "DETALLE DID / ESTADO"
             ui.run()
         self.assertFalse(ui.exception)
         self.assertFalse(ui.error)
-        self.assertEqual(len(ui.tabs[1].get("plotly_chart")), 2)
-        self.assertEqual(len(ui.tabs[1].get("iframe")), 3)
+        self.assertEqual(len(ui.tabs[1].get("plotly_chart")), 0)
+        self.assertEqual(len(ui.tabs[1].get("iframe")), 1)
+        self.assertEqual(len(ui.checkbox), 0)
+        self.assertEqual(ui.selectbox(key="detail-render-section").value, "DID / Mes / Proveedor")
+        detail_cards = [element.value for element in ui.markdown if 'class="kpi-card' in element.value]
+        self.assertEqual(detail_cards, cards)
 
     def test_empty_selection_renders_without_new_kpis(self):
         self.write_csv("calls.csv", [self.row("2026-06-01")])

@@ -55,6 +55,21 @@ Las sesiones concurrentes comparten los metadatos y serializan la preparacion de
 
 El detalle DID / Estado prepara su propio resumen la primera vez que se abre. Muestra el archivo y lote en proceso, la reutilizacion de resumenes y la agrupacion de resultados. Esta primera preparacion puede tardar varios minutos; las siguientes aperturas reutilizan la cache. Otras tareas de conversion o division comparten disco y CPU y pueden alargar esta preparacion.
 
+### Presentacion del detalle
+
+En **DETALLE DID / ESTADO**, un selector muestra solo una de las cinco tablas o graficos a la vez.
+Las tablas tienen una altura de 700 pixeles y dibujan hasta 100 filas visibles por pagina, conservando el orden y
+los controles de la jerarquia (padres e hijos pueden quedar en paginas distintas).
+La busqueda considera todas las filas; la descarga incluye la jerarquia completa
+que corresponde a la busqueda, incluso hijos contraidos y otras paginas.
+Los totales siguen calculandose sobre todas las filas base, sin cambiar filtros,
+fuentes, clasificacion, agregaciones ni cache.
+
+La paginacion no se activa en otras pestanas.
+Esta presentacion reduce elementos del navegador, pero no reduce los datos enviados
+por cada tabla ni la preparacion inicial del resumen, y no garantiza solucionar
+el error `removeChild` en Cloud; debe verificarse en el despliegue.
+
 - La primera carga prepara un resumen SQLite por Parquet descargado en su carpeta `.dashboard_cache`, dentro de `.drive_cache`. No modifica ni elimina las fuentes remotas ni los originales locales.
 - `3meses_v2.parquet` se mantiene incluido como historico. Mientras no cambie, las siguientes aperturas utilizan su resumen, incluso despues de reiniciar el dashboard o el equipo.
 - Cuando crece o cambia un Parquet, solo se reconstruye su resumen completo; al agregar uno se prepara solo el nuevo. Si no cambio ninguna fuente, se usan sus resumenes directamente.

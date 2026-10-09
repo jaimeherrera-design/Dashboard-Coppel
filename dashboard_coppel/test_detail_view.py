@@ -1,15 +1,77 @@
 from unittest.mock import Mock, patch
 import unittest
+import json
+import re
 
 import pandas as pd
 
 import app
-from detail_view import load_detail_masters, hierarchy_rows, numeric_code, phone_prefix, did_volume_figure, state_figure, detail_table
+from detail_view import load_detail_masters, hierarchy_rows, numeric_code, phone_prefix, did_volume_figure, state_figure, detail_table, render_detail
 from interactive_table import table_html
 from test_data_loading import DataLoadingTests
 
 
 class DetailViewTests(DataLoadingTests):
+    def test_pagination_preserves_full_table_and_weighted_totals(self):
+        table = pd.DataFrame({
+            "did": [f"DID-{index}" for index in range(205)],
+            "month": ["2026-06"] * 205, "provider": ["X"] * 205,
+            "calls": list(range(1, 206)), "contacts": [1] * 205,
+            "talk_sum": [10] * 205, "wrap_sum": [2] * 205, "wait_sum": [3] * 205,
+        })
+        original = table.copy(deep=True)
+        with patch("detail_view.render_interactive_table") as render:
+            detail_table(table, ["did", "month", "provider"], "Detalle")
+            baseline = render.call_args
+            detail_table(table, ["did", "month", "provider"], "Detalle", page_size=100)
+            trial = render.call_args
+        pd.testing.assert_frame_equal(baseline.args[0], trial.args[0])
+        pd.testing.assert_frame_equal(table, original)
+        self.assertEqual(baseline.kwargs["totals"], trial.kwargs["totals"])
+        self.assertEqual(trial.kwargs["totals"]["calls"], sum(range(1, 206)))
+        self.assertEqual(trial.kwargs["totals"]["contacts"], 205)
+        html = table_html(trial.args[0], trial.args[1], "Detalle", hierarchy=True,
+                          totals=trial.kwargs["totals"], page_size=100)
+        payload = json.loads(re.search(
+            r'<script id="table-data" type="application/json">(.*?)</script>', html,
+            re.DOTALL,
+        ).group(1))
+        self.assertEqual(len(payload["rows"]), 615)
+        self.assertEqual(payload["page_size"], 100)
+        self.assertEqual(payload["totals"], trial.kwargs["totals"])
+
+    def test_detail_renders_only_selected_component(self):
+        self.write_csv("calls.csv", [self.row("2026-06-01")])
+        result = self.detail()
+        totals = self.result()
+        original = {key: value.copy(deep=True) for key, value in result.items()
+                    if isinstance(value, pd.DataFrame)}
+        sections = [
+            ("DID / Mes / Proveedor", "did_month"),
+            ("DID / Campaña / Mes", "did_campaign"),
+            ("Volumen por DID", None),
+            ("Estado / Mes / Proveedor", "state_month"),
+            ("TMO / Contactabilidad por estado", None),
+        ]
+        for section, table_key in sections:
+            with self.subTest(section=section), \
+                    patch("detail_view.st.checkbox") as checkbox, \
+                    patch("detail_view.st.caption") as caption, \
+                    patch("detail_view.st.selectbox", return_value=section), \
+                    patch("detail_view.detail_table") as table, \
+                    patch("detail_view.report_chart") as chart:
+                render_detail(result, totals)
+                checkbox.assert_not_called()
+                caption.assert_not_called()
+                self.assertEqual(table.call_count, int(table_key is not None))
+                self.assertEqual(chart.call_count, int(table_key is None))
+                if table_key is not None:
+                    self.assertIs(table.call_args.args[0], result[table_key])
+                    self.assertEqual(table.call_args.kwargs["page_size"], 100)
+                    self.assertEqual(table.call_args.kwargs["height"], 700)
+        for key, frame in original.items():
+            pd.testing.assert_frame_equal(frame, result[key])
+
     def test_detail_reports_source_progress_and_reuses_cache(self):
         self.write_csv("v2.csv", [self.row("2026-06-01")])
         files = app.discover_csv_files(self.root)

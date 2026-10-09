@@ -107,7 +107,7 @@ def hierarchy_rows(table: pd.DataFrame, dimensions: list[str]) -> pd.DataFrame:
     return presentation_metrics(pd.DataFrame(rows, columns=["label", "_id", "_parent", "_depth"] + METRICS))
 
 
-def detail_table(table: pd.DataFrame, dimensions: list[str], title: str, height: int = 380, performance: bool = True) -> None:
+def detail_table(table: pd.DataFrame, dimensions: list[str], title: str, height: int = 380, performance: bool = True, *, page_size: int = 0) -> None:
     display = hierarchy_rows(table, dimensions)
     display["rate"] *= 100
     columns = [("label", title), ("calls", "Total llamadas"), ("contacts", "Llamadas contactadas"), ("rate", "% Contactabilidad")]
@@ -116,7 +116,7 @@ def detail_table(table: pd.DataFrame, dimensions: list[str], title: str, height:
     totals = presentation_metrics(pd.DataFrame([table[METRICS].sum()])).iloc[0].to_dict()
     totals["label"] = "Total"
     totals["rate"] *= 100
-    render_interactive_table(display, columns, title, height=height, hierarchy=True, totals=totals)
+    render_interactive_table(display, columns, title, height=height, hierarchy=True, totals=totals, page_size=page_size)
 
 
 def did_volume_figure(table: pd.DataFrame) -> go.Figure:
@@ -162,14 +162,19 @@ def render_detail(result: dict, totals: dict) -> None:
     if result["did"].empty:
         st.info("No hay llamadas para los filtros seleccionados.")
         return
-    left, right = st.columns(2)
-    with left:
-        detail_table(result["did_month"], ["did", "month", "provider"], "DID / Mes / Proveedor")
-    with right:
-        detail_table(result["did_campaign"], ["did", "Campaign Name", "month"], "DID / Campaña / Mes", performance=False)
-    report_chart(did_volume_figure(result["did"]), 380)
-    left, right = st.columns(2)
-    with left:
-        detail_table(result["state_month"], ["state", "month", "provider"], "Estado / Mes / Proveedor", height=500)
-    with right:
+    section = st.selectbox(
+        "Componente del detalle",
+        ["DID / Mes / Proveedor", "DID / Campaña / Mes",
+         "Volumen por DID", "Estado / Mes / Proveedor", "TMO / Contactabilidad por estado"],
+        key="detail-render-section",
+    )
+    if section == "DID / Mes / Proveedor":
+        detail_table(result["did_month"], ["did", "month", "provider"], section, height=700, page_size=100)
+    elif section == "DID / Campaña / Mes":
+        detail_table(result["did_campaign"], ["did", "Campaign Name", "month"], section, height=700, performance=False, page_size=100)
+    elif section == "Volumen por DID":
+        report_chart(did_volume_figure(result["did"]), 380)
+    elif section == "Estado / Mes / Proveedor":
+        detail_table(result["state_month"], ["state", "month", "provider"], section, height=700, page_size=100)
+    else:
         report_chart(state_figure(result["state"], totals), 500)

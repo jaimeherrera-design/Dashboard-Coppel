@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit.components.v1 as components
 
 
-def table_html(data: pd.DataFrame, columns: list[tuple[str, str]], title: str, *, hierarchy: bool = False, totals: dict | None = None, compact: bool = False) -> str:
+def table_html(data: pd.DataFrame, columns: list[tuple[str, str]], title: str, *, hierarchy: bool = False, totals: dict | None = None, compact: bool = False, page_size: int = 0) -> str:
     payload = json.dumps(
         {
             "rows": data[[key for key, _ in columns] + (["_id", "_parent", "_depth"] if hierarchy else [])].to_dict(orient="records"),
@@ -13,6 +13,7 @@ def table_html(data: pd.DataFrame, columns: list[tuple[str, str]], title: str, *
             "hierarchy": hierarchy,
             "totals": totals,
             "compact": compact,
+            "page_size": page_size,
         },
         ensure_ascii=True,
         allow_nan=False,
@@ -50,6 +51,7 @@ tfoot td{position:sticky;bottom:0;background:#23458f;color:white;font-weight:700
         + """\">
 <div class="toolbar"><input id="search" type="search" placeholder="Buscar en la tabla..." aria-label="Buscar en la tabla">
 <button id="download" type="button">Descargar CSV</button><button id="expand" type="button">Ampliar tabla</button></div>
+<div id="pagination" class="toolbar" hidden><button id="previous" type="button">Anterior</button><span id="page-info" aria-live="polite"></span><button id="next" type="button">Siguiente</button></div>
 <div class="viewport" tabindex="0" role="region" aria-label="Tabla con desplazamiento horizontal y vertical">
 <table><colgroup id="widths"></colgroup><thead><tr id="headers"></tr></thead><tbody id="rows"></tbody><tfoot id="totals"></tfoot></table></div>
 <div id="error" role="alert"></div></section>
@@ -60,12 +62,23 @@ tfoot td{position:sticky;bottom:0;background:#23458f;color:white;font-weight:700
 const data=JSON.parse(document.getElementById("table-data").textContent);
 if(data.compact)document.querySelector("table").classList.add("compact");
 let sortKey=null,ascending=true;
+let pageIndex=0;
+const pageSize=data.page_size;
+const pagination=document.getElementById("pagination");
+pagination.style.display=pageSize>0?"flex":"none";
+const parents=new Set(data.rows.map(row=>row._parent));
+const maxima={};
+for(const col of data.columns){
+  if(col.key==="calls"||col.key==="contacts"||col.key==="noncontacts"){
+    maxima[col.key]=data.rows.reduce((maximum,row)=>Math.max(maximum,row[col.key]),1);
+  }
+}
 const expanded=new Set(data.hierarchy?data.rows.filter(row=>row._depth===0).map(row=>row._id):[]);
 const search=document.getElementById("search");
 const formatInt=new Intl.NumberFormat("es-CO",{maximumFractionDigits:0});
 const formatOne=new Intl.NumberFormat("es-CO",{minimumFractionDigits:1,maximumFractionDigits:1});
 const formatTwo=new Intl.NumberFormat("es-CO",{minimumFractionDigits:2,maximumFractionDigits:2});
-function visibleRows(){
+function visibleRows(includeCollapsed=false){
   const query=search.value.trim().toLocaleLowerCase("es");
   const matches=row=>data.columns.some(col=>String(row[col.key]).toLocaleLowerCase("es").includes(query));
   const compare=(a,b)=>{
@@ -91,7 +104,7 @@ function visibleRows(){
       for(const row of siblings){
         if(query&&!included.has(row._id))continue;
         rows.push(row);
-        if(query||expanded.has(row._id))visit(row._id);
+        if(query||includeCollapsed||expanded.has(row._id))visit(row._id);
       }
     }
     visit("");return rows;
@@ -102,7 +115,14 @@ function visibleRows(){
 }
 function render(){
   const body=document.getElementById("rows");body.replaceChildren();
-  for(const row of visibleRows()){
+  const rows=visibleRows();
+  const pageCount=pageSize>0?Math.max(1,Math.ceil(rows.length/pageSize)):1;
+  pageIndex=Math.max(0,Math.min(pageIndex,pageCount-1));
+  document.getElementById("previous").disabled=pageIndex===0;
+  document.getElementById("next").disabled=pageIndex>=pageCount-1;
+  document.getElementById("page-info").textContent=`Página ${pageIndex+1} de ${pageCount} · ${rows.length} filas visibles; total general sin cambios`;
+  const pageRows=pageSize>0?rows.slice(pageIndex*pageSize,(pageIndex+1)*pageSize):rows;
+  for(const row of pageRows){
     const tr=document.createElement("tr");
     if(data.hierarchy&&row._depth===0)tr.className="tree-root";
     for(const col of data.columns){
@@ -110,14 +130,14 @@ function render(){
       td.dataset.key=col.key;td.dataset.value=String(value);
       if(col.key==="calls"||col.key==="contacts"||col.key==="noncontacts"){
         td.textContent=formatInt.format(value);
-        const maximum=Math.max(1,...data.rows.map(item=>item[col.key]));
+        const maximum=maxima[col.key];
         const percent=Math.max(0,Math.min(100,value/maximum*100));
         td.style.background=`linear-gradient(90deg,#b6e9b0 ${percent}%,transparent ${percent}%)`;
       }else if(col.key==="rate"||col.key==="share"||col.key==="failure_share")td.textContent=formatTwo.format(value)+"%";
       else if(col.key==="tmo"||col.key==="idle")td.textContent=formatOne.format(value);
       else if(data.hierarchy&&col.key==="label"){
         td.style.paddingLeft=(12+row._depth*18)+"px";
-        if(data.rows.some(item=>item._parent===row._id)){
+        if(parents.has(row._id)){
           const button=document.createElement("button");button.type="button";button.className="tree-toggle";
           button.textContent=expanded.has(row._id)?"−":"+";
           button.setAttribute("aria-label",(expanded.has(row._id)?"Contraer ":"Expandir ")+value);
@@ -144,7 +164,7 @@ for(const [index,col] of data.columns.entries()){
   document.getElementById("widths").append(width);
   const th=document.createElement("th"),button=document.createElement("button");
   th.scope="col";th.dataset.key=col.key;th.dataset.label=col.label;button.type="button";
-  button.addEventListener("click",()=>{ascending=sortKey===col.key?!ascending:true;sortKey=col.key;render();});
+  button.addEventListener("click",()=>{ascending=sortKey===col.key?!ascending:true;sortKey=col.key;pageIndex=0;render();});
   th.append(button);document.getElementById("headers").append(th);
 }
 if(data.totals){
@@ -160,11 +180,13 @@ if(data.totals){
   }
   document.getElementById("totals").append(tr);
 }
-search.addEventListener("input",render);
+search.addEventListener("input",()=>{pageIndex=0;render();});
+document.getElementById("previous").addEventListener("click",()=>{pageIndex--;render();});
+document.getElementById("next").addEventListener("click",()=>{pageIndex++;render();});
 document.getElementById("download").addEventListener("click",()=>{
   const quote=value=>'"'+String(value).replace(/"/g,'""')+'"';
   const safe=value=>typeof value==="string"&&/^[=+@\\-\\t\\r]/.test(value)?"'"+value:value;
-  const rows=[data.columns.map(col=>quote(col.label)).join(";"),...visibleRows().map(row=>data.columns.map(col=>quote(safe(row[col.key]))).join(";"))];
+  const rows=[data.columns.map(col=>quote(col.label)).join(";"),...visibleRows(pageSize>0).map(row=>data.columns.map(col=>quote(safe(row[col.key]))).join(";"))];
   const url=URL.createObjectURL(new Blob(["\\ufeff"+rows.join("\\r\\n")],{type:"text/csv;charset=utf-8"}));
   const a=document.createElement("a");a.href=url;a.download="Coppel_tabla.csv";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 });
@@ -179,5 +201,5 @@ render();
     )
 
 
-def render_interactive_table(data: pd.DataFrame, columns: list[tuple[str, str]], title: str, *, height: int = 324, hierarchy: bool = False, totals: dict | None = None, compact: bool = False) -> None:
-    components.html(table_html(data, columns, title, hierarchy=hierarchy, totals=totals, compact=compact), height=height, scrolling=False)
+def render_interactive_table(data: pd.DataFrame, columns: list[tuple[str, str]], title: str, *, height: int = 324, hierarchy: bool = False, totals: dict | None = None, compact: bool = False, page_size: int = 0) -> None:
+    components.html(table_html(data, columns, title, hierarchy=hierarchy, totals=totals, compact=compact, page_size=page_size), height=height, scrolling=False)
