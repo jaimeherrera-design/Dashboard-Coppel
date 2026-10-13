@@ -1,4 +1,4 @@
-"""Reporte PDF de recurrencia e intentos por teléfono (CLI y botón del panel lateral del dashboard)."""
+"""Reporte PDF de recurrencia e intentos por teléfono (CLI independiente del dashboard)."""
 from __future__ import annotations
 
 import argparse
@@ -15,7 +15,11 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parent.parent
+)
 OUTPUT_DIR = ROOT / "Reportes"
 EXCLUDED_CAMPAIGN_PATTERN = r"test|prueba"
 INVALID_DATA_PATTERN = r"invalid number|fuera de servicio|no existe|equivocado|ya no vive"
@@ -506,20 +510,32 @@ def build_pdf(m: dict, insights: list[dict], output: Path, sources: list[str], c
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
 
 
-def discover_sources(local: bool) -> tuple[list[Path], Path]:
+def discover_sources(local: bool) -> tuple[list[Path], Path, Path]:
     if local:
         cache = ROOT / ".drive_cache"
         latest: dict[str, Path] = {}
         for path in sorted(cache.rglob("*.parquet"), key=lambda item: item.stat().st_mtime):
             latest[path.name.casefold()] = path
         masters = sorted(cache.rglob("Mae_contacto.xlsx"), key=lambda item: item.stat().st_mtime)
-        if not latest or not masters:
-            raise ValueError("No hay Parquet o Mae_contacto.xlsx en .drive_cache. Ejecute sin --local para sincronizar Drive.")
-        return sorted(latest.values(), key=lambda item: item.name.casefold()), masters[-1]
+        mora_masters = sorted(cache.rglob("Mae_Mora.xlsx"), key=lambda item: item.stat().st_mtime)
+        if not latest or not masters or not mora_masters:
+            raise ValueError(
+                "No hay Parquet, Mae_contacto.xlsx o Mae_Mora.xlsx completos en .drive_cache. "
+                "Ejecute sin --local para sincronizar Drive."
+            )
+        return (
+            sorted(latest.values(), key=lambda item: item.name.casefold()),
+            masters[-1],
+            mora_masters[-1],
+        )
     from drive_sources import discover_drive_sources
 
     sources = discover_drive_sources(ROOT)
-    return [Path(signature[0]) for signature in sources.parquet], Path(sources.masters["Mae_contacto.xlsx"][0])
+    return (
+        [Path(signature[0]) for signature in sources.parquet],
+        Path(sources.masters["Mae_contacto.xlsx"][0]),
+        Path(sources.masters["Mae_Mora.xlsx"][0]),
+    )
 
 
 def group_by_mora(campaigns: pd.DataFrame, mora: Path) -> pd.DataFrame:
@@ -570,12 +586,14 @@ def main(argv: list[str] | None = None) -> Path:
     parser.add_argument("--salida", type=Path, help="Ruta del PDF de salida")
     args = parser.parse_args(argv)
     began = time.time()
-    files, mapping = discover_sources(args.local)
+    files, mapping, mora = discover_sources(args.local)
     print(f"Fuentes: {', '.join(path.name for path in files)}")
     arrays, campaign_names, totals = read_calls(files, load_contact_outcomes(mapping), args.desde, args.hasta)
     print(f"Llamadas en periodo: {totals['calls']:,} · sin teléfono válido: {totals['invalid_phone_calls']:,}. Analizando...")
     metrics = analyze(arrays, campaign_names)
     del arrays
+    metrics["campaigns"] = group_by_mora(metrics["campaigns"], mora)
+    metrics["by_mora"] = True
     metrics["invalid_phone_calls_source"] = totals["invalid_phone_calls"]
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     output = args.salida or OUTPUT_DIR / f"Recurrencia_Intentos_{stamp}.pdf"

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from recurrence_report import analyze, build_insights, build_pdf, normalize_phones, read_calls
+from recurrence_report import analyze, build_insights, build_pdf, group_by_mora, normalize_phones, read_calls
 
 
 def calls(rows):
@@ -50,6 +50,29 @@ class RecurrenceReportTests(unittest.TestCase):
         insights = build_insights(m)
         self.assertEqual(len(insights), 6)
         self.assertTrue(all(item["status"] in {"green", "amber", "red"} for item in insights))
+
+    def test_group_by_mora_preserves_campaign_totals_for_standalone_report(self):
+        with TemporaryDirectory() as folder:
+            mora = Path(folder) / "Mae_Mora.xlsx"
+            pd.DataFrame({
+                "Campaña": ["Camp A", "Camp B"],
+                "ALTURA DE MORA": ["Mora 1", "Mora 1"],
+                "Posicion": [1, 1],
+            }).to_excel(mora, index=False)
+            campaigns = pd.DataFrame({
+                "campaña": ["Camp A", "Camp B", "Camp C"],
+                "llamadas": [10, 20, 5],
+                "llamadas_cronicos": [2, 3, 1],
+            })
+
+            grouped = group_by_mora(campaigns, mora).set_index("campaña")
+
+        self.assertEqual(grouped.loc["Mora 1", ["llamadas", "llamadas_cronicos"]].tolist(), [30, 5])
+        self.assertEqual(
+            grouped.loc["Sin altura de mora", ["llamadas", "llamadas_cronicos"]].tolist(),
+            [5, 1],
+        )
+        self.assertAlmostEqual(grouped.loc["Mora 1", "pct_cronicos"], 5 / 30)
 
     def test_read_calls_uses_dashboard_exclusions_and_builds_pdf(self):
         with TemporaryDirectory() as folder:

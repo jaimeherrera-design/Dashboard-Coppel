@@ -25,7 +25,6 @@ from detail_view import DETAIL_VERSION, UNMAPPED, numeric_code, phone_prefix, ph
 from outcome_view import render_outcomes
 from contact_analysis import render_contact_analysis
 from drive_sources import discover_drive_sources
-from report_jobs import ReportJobManager
 from mora import MORA_FILE, map_campaigns, read_mora_master, set_order, sorted_moras
 from streamlit.errors import StreamlitSecretNotFoundError
 
@@ -550,64 +549,6 @@ def unmapped_outcomes_excel(table: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
-@st.cache_resource(show_spinner=False)
-def recurrence_pdf_jobs() -> ReportJobManager:
-    return ReportJobManager()
-
-
-@st.fragment(run_every="2s")
-def render_recurrence_export(files: tuple[FileSignature, ...], mapping_signature: FileSignature,
-                             start, end, mora_signature: FileSignature | None = None) -> None:
-    key = (files, mapping_signature, start, end, mora_signature)
-    from recurrence_report import generate_report
-
-    if st.sidebar.button(
-        "Generar PDF recurrencia",
-        use_container_width=True,
-        help="Análisis de recurrencia e intentos por teléfono del periodo seleccionado (ilocalizables, "
-             "marcaciones hasta contacto y 6 insights semaforizados).",
-    ):
-        csv_name = f"Recurrencia_Intentos_{start:%Y%m%d}_{end:%Y%m%d}_ilocalizables_cronicos.csv"
-
-        def generate(progress):
-            return generate_report(
-                [Path(item[0]) for item in files],
-                Path(mapping_signature[0]),
-                start,
-                end,
-                csv_name=csv_name,
-                log=lambda _: None,
-                mora=Path(mora_signature[0]) if mora_signature else None,
-                progress=progress,
-            )
-
-        if not recurrence_pdf_jobs().start(key, generate):
-            st.sidebar.info("Ya hay otro reporte en proceso. Espera a que termine para generar uno nuevo.")
-
-    status = recurrence_pdf_jobs().status(key)
-    if status["state"] == "running":
-        percent = int(round(status["progress"] * 100))
-        st.sidebar.progress(percent, text=f"{percent} % · {status['message']}")
-    elif status["state"] == "busy":
-        percent = int(round(status["progress"] * 100))
-        st.sidebar.progress(percent, text=f"{percent} % · Otro reporte: {status['message']}")
-    elif status["state"] == "error":
-        st.sidebar.error(f"No se pudo generar el PDF: {status['message']}")
-    elif status["state"] == "complete":
-        pdf_data, csv_data = status["result"]
-        stamp = f"{start:%Y%m%d}_{end:%Y%m%d}"
-        st.sidebar.success("PDF listo para descargar.")
-        st.sidebar.download_button(
-            "Descargar PDF", data=pdf_data, file_name=f"Recurrencia_Intentos_{stamp}.pdf",
-            mime="application/pdf", use_container_width=True,
-        )
-        st.sidebar.download_button(
-            "Descargar ilocalizables crónicos (CSV)", data=csv_data,
-            file_name=f"Recurrencia_Intentos_{stamp}_ilocalizables_cronicos.csv",
-            mime="text/csv", use_container_width=True,
-        )
-
-
 @st.cache_data(show_spinner=False)
 def aggregate_outcomes(files: tuple[FileSignature, ...], mapping_signature: FileSignature,
                        filters: dict, _status=None) -> pd.DataFrame:
@@ -1077,9 +1018,6 @@ def main() -> None:
     contact_rate = result["contacts"] / total if total else 0
     tmo =  (result["talk_sum"] + result["wrap_sum"]) / total if total else 0
     kpi_idle, kpi_tmo = dialer_kpis(result["call_type"])
-    st.sidebar.divider()
-    st.sidebar.markdown("### Exportar reporte")
-    render_recurrence_export(files, mapping_signature, filters["start"], filters["end"], mora_signature)
     if st.sidebar.button("Exportar resultados sin maestro", use_container_width=True,
                          help="Resultados de llamada únicos que no están en Mae_contacto.xlsx, con los filtros activos."):
         try:

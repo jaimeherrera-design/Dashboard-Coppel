@@ -104,7 +104,7 @@ el error `removeChild` en Cloud; debe verificarse en el despliegue.
 
 El **Periodo** del panel lateral se elige con tres listas: **Año**, **Mes** y **Fecha** (cada una con la opcion Todos/Todas). Mes se habilita al elegir un año y Fecha al elegir un mes; la seleccion se convierte en el rango de fechas usado por todos los calculos, limitado a las fechas con datos.
 
-Desde el panel lateral, **Generar PDF recurrencia** crea el analisis de recurrencia e intentos por telefono del periodo seleccionado (ilocalizables, marcaciones hasta contacto y 6 insights semaforizados) y ofrece descargar el PDF y el CSV de ilocalizables cronicos. Usa solo el periodo; los demas filtros no aplican a este reporte. El reporte se procesa en segundo plano para que la pagina y sus KPI sigan respondiendo; el progreso se actualiza automaticamente y aparecen las descargas al terminar. Solo se ejecuta un reporte pesado a la vez y el resultado queda en cache para reutilizarlo con las mismas fuentes y periodo. Generarlo consume recursos compartidos del servidor mientras esta en proceso.
+La exportacion PDF de recurrencia y su generador independiente fueron retirados. El dashboard ya no genera ni descarga ese reporte.
 
 **Exportar resultados sin maestro** genera un Excel (`Resultados_sin_maestro_AAAAMMDD.xlsx`) con los resultados de llamada **únicos** que no existen en `Mae_contacto.xlsx`, según los filtros activos. Los nombres se deduplican sin distinguir mayúsculas ni espacios. Trae las columnas del maestro (`Call Outcome name` y `Contacto / No Contacto` vacía, para asignarla), más llamadas y número de alturas de mora como referencia. Si no hay pendientes, muestra un aviso.
 
