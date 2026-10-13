@@ -55,20 +55,26 @@ def normalize_phones(values: pa.Array) -> pa.Array:
     return pc.cast(pc.if_else(valid, text, pa.scalar(None, pa.string())), pa.int64())
 
 
-def read_calls(files: list[Path], contact_outcomes: set[str], start: date | None, end: date | None, log=print):
+def read_calls(files: list[Path], contact_outcomes: set[str], start: date | None, end: date | None, log=print, progress=None):
     """Lee las llamadas con las mismas exclusiones que el dashboard y devuelve arreglos compactos."""
     parts = {key: [] for key in ["phone", "ts", "contact", "invalid", "campaign"]}
     campaigns: dict[str, int] = {}
     totals = {"calls": 0, "invalid_phone_calls": 0}
     lower = pd.Timestamp(start) if start else None
     upper = pd.Timestamp(end) + pd.Timedelta(days=1) if end else None
-    for path in files:
+    total_rows = sum(pq.ParquetFile(path).metadata.num_rows for path in files) if progress else 0
+    rows_read = 0
+    for index, path in enumerate(files, 1):
         reader = pq.ParquetFile(path)
         missing = set(COLUMNS).difference(reader.schema_arrow.names)
         if missing:
             raise ValueError(f"{path.name}: faltan columnas {', '.join(sorted(missing))}")
         log(f"Leyendo {path.name} ({reader.metadata.num_rows:,} filas)...")
         for batch in reader.iter_batches(batch_size=BATCH_ROWS, columns=COLUMNS):
+            rows_read += batch.num_rows
+            if progress:
+                progress(rows_read / max(total_rows, 1), f"Leyendo archivo {index} de {len(files)} "
+                         f"({rows_read:,} de {total_rows:,} registros)".replace(",", "."))
             ends = pd.to_datetime(batch.column("Call end").to_pandas(), errors="coerce")
             campaign = pc.utf8_trim_whitespace(pc.fill_null(pc.cast(batch.column("Campaign Name"), pa.string()), "Sin dato"))
             keep = ends.notna().to_numpy() & ~pc.match_substring_regex(
@@ -529,20 +535,30 @@ def group_by_mora(campaigns: pd.DataFrame, mora: Path) -> pd.DataFrame:
 
 
 def generate_report(files: list[Path], mapping: Path, start: date | None, end: date | None,
-                    csv_name: str = "ilocalizables_cronicos.csv", log=print, mora: Path | None = None) -> tuple[bytes, bytes]:
-    """Genera el PDF y el CSV de ilocalizables crónicos en memoria."""
-    arrays, campaign_names, totals = read_calls(files, load_contact_outcomes(mapping), start, end, log=log)
+                    csv_name: str = "ilocalizables_cronicos.csv", log=print, mora: Path | None = None,
+                    progress=None) -> tuple[bytes, bytes]:
+    """Genera el PDF y el CSV de ilocalizables crónicos en memoria.
+
+    progress(fraccion 0-1, texto) recibe el avance: lectura 0-70 %, análisis 70-85 %, PDF 85-100 %.
+    """
+    step = progress or (lambda *_: None)
+    step(0.0, "Preparando fuentes...")
+    reading = (lambda fraction, text: step(0.70 * fraction, text)) if progress else None
+    arrays, campaign_names, totals = read_calls(files, load_contact_outcomes(mapping), start, end, log=log, progress=reading)
+    step(0.70, "Analizando recurrencia e intentos por teléfono...")
     metrics = analyze(arrays, campaign_names)
     del arrays
     if mora is not None:
         metrics["campaigns"] = group_by_mora(metrics["campaigns"], mora)
         metrics["by_mora"] = True
     metrics["invalid_phone_calls_source"] = totals["invalid_phone_calls"]
+    step(0.85, "Construyendo gráficos y PDF...")
     chronic = metrics["never_list"].loc[metrics["never_list"]["intentos"] >= CHRONIC_ATTEMPTS]
     csv_data = chronic.drop(columns=["contactos", "intentos_hasta_contacto"]).to_csv(index=False, sep=";").encode("utf-8-sig")
     with tempfile.TemporaryDirectory() as folder:
         output = Path(folder) / "reporte.pdf"
         build_pdf(metrics, build_insights(metrics), output, [path.name for path in files], csv_name)
+        step(1.0, "PDF listo para descargar.")
         return output.read_bytes(), csv_data
 
 

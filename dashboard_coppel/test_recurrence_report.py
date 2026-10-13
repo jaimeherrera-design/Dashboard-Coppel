@@ -83,7 +83,13 @@ class RecurrenceReportTests(unittest.TestCase):
             mapping = Path(folder) / "Mae_contacto.xlsx"
             pd.DataFrame({"Call Outcome name": ["1.Convenio", "No Answer"],
                           "Contacto / No Contacto": ["Contacto", "No Contacto"]}).to_excel(mapping, index=False)
-            pdf, csv = generate_report([path], mapping, date(2026, 10, 1), date(2026, 10, 31), log=lambda *_: None)
+            steps = []
+            pdf, csv = generate_report([path], mapping, date(2026, 10, 1), date(2026, 10, 31), log=lambda *_: None,
+                                       progress=lambda fraction, text: steps.append((fraction, text)))
+            fractions = [fraction for fraction, _ in steps]
+            self.assertEqual(fractions, sorted(fractions))
+            self.assertEqual((fractions[0], fractions[-1]), (0.0, 1.0))
+            self.assertTrue(any(text.startswith("Leyendo archivo 1 de 1") for _, text in steps))
             self.assertTrue(pdf.startswith(b"%PDF"))
             lines = csv.decode("utf-8-sig").strip().splitlines()
             self.assertEqual(len(lines), 2)

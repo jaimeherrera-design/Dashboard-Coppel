@@ -6,6 +6,7 @@ from zipfile import BadZipFile
 import hashlib
 import json
 import sqlite3
+from collections import OrderedDict
 
 import pandas as pd
 import pyarrow as pa
@@ -502,15 +503,29 @@ def unmapped_outcomes_excel(table: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
-@st.cache_data(show_spinner=False, max_entries=2)
+@st.cache_resource(show_spinner=False)
+def recurrence_pdf_store() -> OrderedDict:
+    return OrderedDict()
+
+
 def recurrence_pdf(files: tuple[FileSignature, ...], mapping_signature: FileSignature, start, end,
-                   mora_signature: FileSignature | None = None) -> tuple[bytes, bytes]:
+                   mora_signature: FileSignature | None = None, progress=None) -> tuple[bytes, bytes]:
+    # Manual cache: st.cache_data would try to replay the progress bar drawn outside the function.
     from recurrence_report import generate_report
 
+    store = recurrence_pdf_store()
+    key = (files, mapping_signature, start, end, mora_signature)
+    if key in store:
+        store.move_to_end(key)
+        return store[key]
     csv_name = f"Recurrencia_Intentos_{start:%Y%m%d}_{end:%Y%m%d}_ilocalizables_cronicos.csv"
-    return generate_report([Path(item[0]) for item in files], Path(mapping_signature[0]), start, end,
-                           csv_name=csv_name, log=lambda _: None,
-                           mora=Path(mora_signature[0]) if mora_signature else None)
+    result = generate_report([Path(item[0]) for item in files], Path(mapping_signature[0]), start, end,
+                             csv_name=csv_name, log=lambda _: None,
+                             mora=Path(mora_signature[0]) if mora_signature else None, progress=progress)
+    store[key] = result
+    while len(store) > 2:
+        store.popitem(last=False)
+    return result
 
 
 @st.cache_data(show_spinner=False)
@@ -1003,12 +1018,20 @@ def main() -> None:
     if st.sidebar.button("Generar PDF recurrencia", use_container_width=True,
                          help="Análisis de recurrencia e intentos por teléfono del periodo seleccionado (ilocalizables, "
                               "marcaciones hasta contacto y 6 insights semaforizados)."):
+        bar = st.sidebar.progress(0, text="Generando PDF de recurrencia: 0 %")
+
+        def show_progress(fraction: float, text: str) -> None:
+            percent = int(round(min(max(fraction, 0.0), 1.0) * 100))
+            bar.progress(percent, text=f"{percent} % · {text}")
+
         try:
-            with st.spinner("Analizando llamadas por teléfono y construyendo el PDF..."):
-                pdf_data, csv_data = recurrence_pdf(files, mapping_signature, filters["start"], filters["end"], mora_signature)
+            pdf_data, csv_data = recurrence_pdf(files, mapping_signature, filters["start"], filters["end"], mora_signature,
+                                                progress=show_progress)
         except (OSError, ValueError, ImportError, MemoryError, pa.ArrowException) as exc:
+            bar.empty()
             st.sidebar.error(f"No se pudo generar el PDF: {exc}")
         else:
+            bar.progress(100, text="100 % · PDF listo para descargar.")
             stamp = f"{filters['start']:%Y%m%d}_{filters['end']:%Y%m%d}"
             st.sidebar.download_button(
                 "Descargar PDF", data=pdf_data, file_name=f"Recurrencia_Intentos_{stamp}.pdf",
