@@ -6,7 +6,6 @@ from zipfile import BadZipFile
 import hashlib
 import json
 import sqlite3
-from collections import OrderedDict
 
 import pandas as pd
 import pyarrow as pa
@@ -26,6 +25,7 @@ from detail_view import DETAIL_VERSION, UNMAPPED, numeric_code, phone_prefix, ph
 from outcome_view import render_outcomes
 from contact_analysis import render_contact_analysis
 from drive_sources import discover_drive_sources
+from report_jobs import ReportJobManager
 from mora import MORA_FILE, map_campaigns, read_mora_master, set_order, sorted_moras
 from streamlit.errors import StreamlitSecretNotFoundError
 
@@ -59,6 +59,8 @@ NOT_DIALER_CALL_TYPES = {"manual", "preview", "vista previa"}
 FILTER_VERSION = "campaign-exclusion-v8-persistent-source-summaries"
 GROUP_METRICS = ["calls", "contacts", "talk_sum", "wrap_sum", "wait_sum"]
 STATE_VERSION = "state-hourly-v1"
+OUTCOME_VERSION = "daily-outcomes-v1"
+OUTCOME_STATE_VERSION = "daily-outcome-states-v1"
 PPT_NAVY = RGBColor(244, 247, 251)
 PPT_SURFACE = RGBColor(255, 255, 255)
 PPT_LINE = RGBColor(218, 228, 238)
@@ -402,6 +404,51 @@ def read_detail_summaries(files: tuple[FileSignature, ...], status=None):
             yield summary
 
 
+def read_outcome_summaries(files: tuple[FileSignature, ...], status=None, filters: dict | None = None):
+    states = (filters or {}).get("State")
+    if states:
+        _, ladas = load_detail_masters(*filters["detail_masters"])
+        for summary in read_outcome_state_summaries(files, ladas, status, states):
+            yield summary.drop(columns="state")
+        return
+
+    def chunks(signature):
+        for raw in read_source_chunks((signature,), status):
+            yield clean_chunk(raw)
+
+    for signature in files:
+        for summary in iter_summary(
+            signature, lambda: chunks(signature), status,
+            keys=SUMMARY_KEYS, version=OUTCOME_VERSION, namespace=OUTCOME_VERSION,
+            batch_size=250_000, date_format="%Y-%m-%d",
+        ):
+            summary["Call end"] = pd.to_datetime(summary["Call end"], errors="coerce")
+            yield summary
+
+
+def read_outcome_state_summaries(
+    files: tuple[FileSignature, ...], ladas: dict, status=None, states=None,
+):
+    def chunks(signature):
+        for raw in read_source_chunks((signature,), status, detail=True):
+            chunk = clean_chunk(raw)
+            chunk["state"] = phone_state(chunk["Phone"].fillna("").map(phone_prefix), ladas)
+            yield chunk.drop(columns=["Phone", "DDI"])
+
+    version = state_version(ladas)
+    for signature in files:
+        for summary in iter_summary(
+            signature, lambda: chunks(signature), status,
+            keys=SUMMARY_KEYS + ["state"],
+            version=f"{OUTCOME_STATE_VERSION}-{version}",
+            namespace=OUTCOME_STATE_VERSION,
+            batch_size=250_000, date_format="%Y-%m-%d",
+            where=("state", list(states)) if states else None,
+        ):
+            summary["Call end"] = pd.to_datetime(summary["Call end"], errors="coerce")
+            yield summary
+
+
 @st.cache_data(show_spinner=False, max_entries=2)
 def aggregate_detail(files: tuple[FileSignature, ...], contact_signature: FileSignature,
                      did_signature: FileSignature, lada_signature: FileSignature,
@@ -504,36 +551,70 @@ def unmapped_outcomes_excel(table: pd.DataFrame) -> bytes:
 
 
 @st.cache_resource(show_spinner=False)
-def recurrence_pdf_store() -> OrderedDict:
-    return OrderedDict()
+def recurrence_pdf_jobs() -> ReportJobManager:
+    return ReportJobManager()
 
 
-def recurrence_pdf(files: tuple[FileSignature, ...], mapping_signature: FileSignature, start, end,
-                   mora_signature: FileSignature | None = None, progress=None) -> tuple[bytes, bytes]:
-    # Manual cache: st.cache_data would try to replay the progress bar drawn outside the function.
+@st.fragment(run_every="2s")
+def render_recurrence_export(files: tuple[FileSignature, ...], mapping_signature: FileSignature,
+                             start, end, mora_signature: FileSignature | None = None) -> None:
+    key = (files, mapping_signature, start, end, mora_signature)
     from recurrence_report import generate_report
 
-    store = recurrence_pdf_store()
-    key = (files, mapping_signature, start, end, mora_signature)
-    if key in store:
-        store.move_to_end(key)
-        return store[key]
-    csv_name = f"Recurrencia_Intentos_{start:%Y%m%d}_{end:%Y%m%d}_ilocalizables_cronicos.csv"
-    result = generate_report([Path(item[0]) for item in files], Path(mapping_signature[0]), start, end,
-                             csv_name=csv_name, log=lambda _: None,
-                             mora=Path(mora_signature[0]) if mora_signature else None, progress=progress)
-    store[key] = result
-    while len(store) > 2:
-        store.popitem(last=False)
-    return result
+    if st.sidebar.button(
+        "Generar PDF recurrencia",
+        use_container_width=True,
+        help="Análisis de recurrencia e intentos por teléfono del periodo seleccionado (ilocalizables, "
+             "marcaciones hasta contacto y 6 insights semaforizados).",
+    ):
+        csv_name = f"Recurrencia_Intentos_{start:%Y%m%d}_{end:%Y%m%d}_ilocalizables_cronicos.csv"
+
+        def generate(progress):
+            return generate_report(
+                [Path(item[0]) for item in files],
+                Path(mapping_signature[0]),
+                start,
+                end,
+                csv_name=csv_name,
+                log=lambda _: None,
+                mora=Path(mora_signature[0]) if mora_signature else None,
+                progress=progress,
+            )
+
+        if not recurrence_pdf_jobs().start(key, generate):
+            st.sidebar.info("Ya hay otro reporte en proceso. Espera a que termine para generar uno nuevo.")
+
+    status = recurrence_pdf_jobs().status(key)
+    if status["state"] == "running":
+        percent = int(round(status["progress"] * 100))
+        st.sidebar.progress(percent, text=f"{percent} % · {status['message']}")
+    elif status["state"] == "busy":
+        percent = int(round(status["progress"] * 100))
+        st.sidebar.progress(percent, text=f"{percent} % · Otro reporte: {status['message']}")
+    elif status["state"] == "error":
+        st.sidebar.error(f"No se pudo generar el PDF: {status['message']}")
+    elif status["state"] == "complete":
+        pdf_data, csv_data = status["result"]
+        stamp = f"{start:%Y%m%d}_{end:%Y%m%d}"
+        st.sidebar.success("PDF listo para descargar.")
+        st.sidebar.download_button(
+            "Descargar PDF", data=pdf_data, file_name=f"Recurrencia_Intentos_{stamp}.pdf",
+            mime="application/pdf", use_container_width=True,
+        )
+        st.sidebar.download_button(
+            "Descargar ilocalizables crónicos (CSV)", data=csv_data,
+            file_name=f"Recurrencia_Intentos_{stamp}_ilocalizables_cronicos.csv",
+            mime="text/csv", use_container_width=True,
+        )
 
 
 @st.cache_data(show_spinner=False)
-def aggregate_outcomes(files: tuple[FileSignature, ...], mapping_signature: FileSignature, filters: dict) -> pd.DataFrame:
+def aggregate_outcomes(files: tuple[FileSignature, ...], mapping_signature: FileSignature,
+                       filters: dict, _status=None) -> pd.DataFrame:
     parts = []
     outcomes = load_contact_outcomes(mapping_signature)
     dimensions = ["Call Outcome name", "month", "date"]
-    for chunk in read_source_summaries(files, filters=filters):
+    for chunk in read_outcome_summaries(files, _status, filters):
         chunk = apply_mora(chunk, filters)
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
@@ -547,12 +628,13 @@ def aggregate_outcomes(files: tuple[FileSignature, ...], mapping_signature: File
 
 @st.cache_data(show_spinner=False)
 def aggregate_outcome_states(files: tuple[FileSignature, ...], mapping_signature: FileSignature,
-                             detail_masters: tuple[FileSignature, FileSignature], filters: dict) -> pd.DataFrame:
+                             detail_masters: tuple[FileSignature, FileSignature], filters: dict,
+                             _status=None) -> pd.DataFrame:
     parts = []
     outcomes = load_contact_outcomes(mapping_signature)
     _, ladas = load_detail_masters(*detail_masters)
     dimensions = ["Call Outcome name", "state"]
-    for chunk in read_state_summaries(files, ladas, states=filters.get("State")):
+    for chunk in read_outcome_state_summaries(files, ladas, _status, states=filters.get("State")):
         chunk = apply_mora(chunk, filters)
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
@@ -1015,33 +1097,7 @@ def main() -> None:
     kpi_idle, kpi_tmo = dialer_kpis(result["call_type"])
     st.sidebar.divider()
     st.sidebar.markdown("### Exportar reporte")
-    if st.sidebar.button("Generar PDF recurrencia", use_container_width=True,
-                         help="Análisis de recurrencia e intentos por teléfono del periodo seleccionado (ilocalizables, "
-                              "marcaciones hasta contacto y 6 insights semaforizados)."):
-        bar = st.sidebar.progress(0, text="Generando PDF de recurrencia: 0 %")
-
-        def show_progress(fraction: float, text: str) -> None:
-            percent = int(round(min(max(fraction, 0.0), 1.0) * 100))
-            bar.progress(percent, text=f"{percent} % · {text}")
-
-        try:
-            pdf_data, csv_data = recurrence_pdf(files, mapping_signature, filters["start"], filters["end"], mora_signature,
-                                                progress=show_progress)
-        except (OSError, ValueError, ImportError, MemoryError, pa.ArrowException) as exc:
-            bar.empty()
-            st.sidebar.error(f"No se pudo generar el PDF: {exc}")
-        else:
-            bar.progress(100, text="100 % · PDF listo para descargar.")
-            stamp = f"{filters['start']:%Y%m%d}_{filters['end']:%Y%m%d}"
-            st.sidebar.download_button(
-                "Descargar PDF", data=pdf_data, file_name=f"Recurrencia_Intentos_{stamp}.pdf",
-                mime="application/pdf", use_container_width=True,
-            )
-            st.sidebar.download_button(
-                "Descargar ilocalizables crónicos (CSV)", data=csv_data,
-                file_name=f"Recurrencia_Intentos_{stamp}_ilocalizables_cronicos.csv",
-                mime="text/csv", use_container_width=True,
-            )
+    render_recurrence_export(files, mapping_signature, filters["start"], filters["end"], mora_signature)
     if st.sidebar.button("Exportar resultados sin maestro", use_container_width=True,
                          help="Resultados de llamada únicos que no están en Mae_contacto.xlsx, con los filtros activos."):
         try:
@@ -1099,14 +1155,20 @@ def main() -> None:
     if outcomes.open:
         with outcomes:
             with st.container(border=False, key="outcome-content"):
+                outcome_status = None
                 try:
-                    with st.spinner("Preparando resultados de llamadas..."):
-                        outcome_result = aggregate_outcomes(files, mapping_signature, filters)
+                    outcome_status = st.status("Preparando resultados de llamadas...", expanded=False)
+                    outcome_result = aggregate_outcomes(
+                        files, mapping_signature, filters, _status=outcome_status,
+                    )
+                    outcome_status.update(label="Resultados de llamadas listos", state="complete")
                     render_outcomes(
                         outcome_result,
                         lambda: aggregate_outcome_states(files, mapping_signature, detail_masters, filters),
                     )
                 except (OSError, ValueError, ImportError, BadZipFile, sqlite3.Error, pd.errors.DatabaseError) as exc:
+                    if outcome_status is not None:
+                        outcome_status.update(label="No se pudieron preparar los resultados", state="error")
                     st.error(f"No se pudieron cargar los resultados de llamadas: {exc}")
     if analysis.open:
         with analysis:

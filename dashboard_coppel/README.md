@@ -104,7 +104,7 @@ el error `removeChild` en Cloud; debe verificarse en el despliegue.
 
 El **Periodo** del panel lateral se elige con tres listas: **Año**, **Mes** y **Fecha** (cada una con la opcion Todos/Todas). Mes se habilita al elegir un año y Fecha al elegir un mes; la seleccion se convierte en el rango de fechas usado por todos los calculos, limitado a las fechas con datos.
 
-Desde el panel lateral, **Generar PDF recurrencia** crea el analisis de recurrencia e intentos por telefono del periodo seleccionado (ilocalizables, marcaciones hasta contacto y 6 insights semaforizados) y ofrece descargar el PDF y el CSV de ilocalizables cronicos. Usa solo el periodo; los demas filtros no aplican a este reporte. Tarda alrededor de 1 minuto con la base completa; una barra de progreso muestra el porcentaje y la etapa (lectura de archivos y registros, analisis, construccion del PDF). El resultado queda en cache para el mismo periodo.
+Desde el panel lateral, **Generar PDF recurrencia** crea el analisis de recurrencia e intentos por telefono del periodo seleccionado (ilocalizables, marcaciones hasta contacto y 6 insights semaforizados) y ofrece descargar el PDF y el CSV de ilocalizables cronicos. Usa solo el periodo; los demas filtros no aplican a este reporte. El reporte se procesa en segundo plano para que la pagina y sus KPI sigan respondiendo; el progreso se actualiza automaticamente y aparecen las descargas al terminar. Solo se ejecuta un reporte pesado a la vez y el resultado queda en cache para reutilizarlo con las mismas fuentes y periodo. Generarlo consume recursos compartidos del servidor mientras esta en proceso.
 
 **Exportar resultados sin maestro** genera un Excel (`Resultados_sin_maestro_AAAAMMDD.xlsx`) con los resultados de llamada **únicos** que no existen en `Mae_contacto.xlsx`, según los filtros activos. Los nombres se deduplican sin distinguir mayúsculas ni espacios. Trae las columnas del maestro (`Call Outcome name` y `Contacto / No Contacto` vacía, para asignarla), más llamadas y número de alturas de mora como referencia. Si no hay pendientes, muestra un aviso.
 
@@ -143,9 +143,11 @@ La tabla ajusta sus dos columnas al ancho disponible: resultado/mes/fecha ocupa 
 
 El selector **Agrupar por** permite ver la tabla como Resultado / Mes / Fecha, Resultado / Estado o Estado / Resultado. El estado se obtiene de la lada del telefono con `Mae_lada.xlsx` (el maestro no incluye ciudad); los telefonos sin coincidencia quedan en **Sin cruce**.
 
+El contenido de la pestana solo se prepara al abrirla. En esa primera carga se construyen resumenes persistentes por dia y resultado de llamada, incluyendo la dimension de estado cuando corresponde; se lee el Parquet en lotes y se muestra el avance. Las siguientes visitas reutilizan la cache SQLite en lugar de recorrer los resumenes horarios. Se conservan los filtros, clasificacion de contacto, agrupaciones y metricas existentes; cambiar `Mae_lada.xlsx` reconstruye solo el resumen por estado.
+
 ## Filtro Estado (panel lateral)
 
-El filtro **Estado** aplica a todo el dashboard. Sin estados seleccionados se usan los resumenes originales, por lo que las cifras no cambian. La primera seleccion prepara una cache horaria por estado (puede tardar varios minutos); despues responde en segundos.
+El filtro **Estado** aplica a todo el dashboard. Sin estados seleccionados se usan los resumenes originales, por lo que las cifras no cambian. La primera seleccion prepara una cache por estado; despues responde en segundos.
 
 ## Pestana ANALISIS CONTACTABILIDAD
 

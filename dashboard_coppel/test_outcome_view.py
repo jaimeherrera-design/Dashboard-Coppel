@@ -1,9 +1,11 @@
 from unittest.mock import patch
 import unittest
 
+import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 import app
+from data_cache import SUMMARY_KEYS
 from outcome_view import outcome_figure, render_outcomes
 from test_data_loading import DataLoadingTests
 
@@ -19,8 +21,11 @@ class OutcomeViewTests(DataLoadingTests):
         files = app.discover_csv_files(self.root)
         signature = app.file_signature(self.mapping)
         main = self.result()
+        result = app.aggregate_outcomes(files, signature, self.filters)
         with patch.object(app, "read_source_chunks", side_effect=AssertionError("CSV reread")):
-            result = app.aggregate_outcomes(files, signature, self.filters)
+            cached = list(app.read_outcome_summaries(files))
+        self.assertEqual(len(cached), 1)
+        pd.testing.assert_frame_equal(result, app.aggregate_outcomes(files, signature, self.filters))
         self.assertEqual(result["calls"].sum(), main["total"])
         self.assertEqual(result["contacts"].sum(), main["contacts"])
         self.assertEqual(result["date"].tolist(), ["2026-07-02", "2026-06-01"])
@@ -78,6 +83,55 @@ class OutcomeViewTests(DataLoadingTests):
         self.assertFalse(ui.error)
         self.assertEqual(len(ui.tabs[2].get("iframe")), 1)
         self.assertEqual(len(ui.tabs[2].get("plotly_chart")), 1)
+
+    def test_daily_outcome_summaries_preserve_metrics_and_reduce_rows(self):
+        rows = [self.row(f"2026-06-01 {hour:02}:15:00", talk=hour / 10) for hour in range(24)]
+        rows += [
+            self.row("2026-06-02 23:59:59", outcome="Busy", campaign="Otra"),
+            self.row("2026-06-02 08:00:00", outcome="Busy", campaign="Otra"),
+            self.row("2026-06-02 09:00:00", outcome="Busy", campaign="Otra"),
+            self.row("2026-06-01 12:00:00", campaign="Prueba"),
+        ]
+        self.write_csv("calls.csv", rows)
+        files = app.discover_csv_files(self.root)
+        hourly = pd.concat(list(app.read_source_summaries(files)), ignore_index=True)
+        daily = pd.concat(list(app.read_outcome_summaries(files)), ignore_index=True)
+
+        self.assertLess(len(daily), len(hourly))
+        self.assertEqual(len(daily), 3)
+        metrics = ["calls", "talk_sum", "wrap_sum", "wait_sum"]
+        pd.testing.assert_series_equal(
+            hourly[metrics].sum().sort_index(),
+            daily[metrics].sum().sort_index(),
+        )
+        self.assertEqual(daily["Call end"].dt.strftime("%H:%M:%S").unique().tolist(), ["00:00:00"])
+        with patch.object(app, "read_source_chunks", side_effect=AssertionError("CSV reread")):
+            reused = list(app.read_outcome_summaries(files))
+        pd.testing.assert_frame_equal(daily, pd.concat(reused, ignore_index=True))
+
+    def test_daily_outcome_state_summaries_preserve_totals_and_state_mapping(self):
+        rows = [
+            self.row(f"2026-06-01 {hour:02}:15:00", talk=hour / 10)
+            for hour in range(24)
+        ]
+        rows += [
+            {**self.row("2026-06-02 10:00:00", outcome="Busy"), "Phone": "8112345678"},
+        ]
+        self.write_csv("calls.csv", rows)
+        files = app.discover_csv_files(self.root)
+        _, ladas = app.load_detail_masters(
+            app.file_signature(self.did_mapping), app.file_signature(self.lada_mapping),
+        )
+        hourly = pd.concat(list(app.read_state_summaries(files, ladas)), ignore_index=True)
+        daily = pd.concat(list(app.read_outcome_state_summaries(files, ladas)), ignore_index=True)
+
+        self.assertLess(len(daily), len(hourly))
+        self.assertEqual(daily.groupby("state")["calls"].sum().to_dict(), {"CDMX": 24, "Sin cruce": 1})
+        metrics = ["calls", "talk_sum", "wrap_sum", "wait_sum"]
+        pd.testing.assert_series_equal(
+            hourly[metrics].sum().sort_index(),
+            daily[metrics].sum().sort_index(),
+        )
 
 
 if __name__ == "__main__":
