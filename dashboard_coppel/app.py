@@ -627,24 +627,6 @@ def aggregate_outcomes(files: tuple[FileSignature, ...], mapping_signature: File
 
 
 @st.cache_data(show_spinner=False)
-def aggregate_outcome_states(files: tuple[FileSignature, ...], mapping_signature: FileSignature,
-                             detail_masters: tuple[FileSignature, FileSignature], filters: dict,
-                             _status=None) -> pd.DataFrame:
-    parts = []
-    outcomes = load_contact_outcomes(mapping_signature)
-    _, ladas = load_detail_masters(*detail_masters)
-    dimensions = ["Call Outcome name", "state"]
-    for chunk in read_outcome_state_summaries(files, ladas, _status, states=filters.get("State")):
-        chunk = apply_mora(chunk, filters)
-        chunk = chunk.loc[selected_mask(chunk, filters)].copy()
-        if chunk.empty:
-            continue
-        chunk["contacts"] = chunk["calls"] * chunk["Call Outcome name"].str.casefold().isin(outcomes).astype(int)
-        parts.append(chunk.groupby(dimensions, as_index=False)[GROUP_METRICS].sum())
-    return combine_groups(parts, dimensions)
-
-
-@st.cache_data(show_spinner=False)
 def contact_hourly_days(files: tuple[FileSignature, ...], mapping_signature: FileSignature, filters: dict) -> pd.DataFrame:
     parts = []
     outcomes = load_contact_outcomes(mapping_signature)
@@ -1162,10 +1144,7 @@ def main() -> None:
                         files, mapping_signature, filters, _status=outcome_status,
                     )
                     outcome_status.update(label="Resultados de llamadas listos", state="complete")
-                    render_outcomes(
-                        outcome_result,
-                        lambda: aggregate_outcome_states(files, mapping_signature, detail_masters, filters),
-                    )
+                    render_outcomes(outcome_result)
                 except (OSError, ValueError, ImportError, BadZipFile, sqlite3.Error, pd.errors.DatabaseError) as exc:
                     if outcome_status is not None:
                         outcome_status.update(label="No se pudieron preparar los resultados", state="error")

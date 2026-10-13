@@ -141,9 +141,9 @@ El grafico de campanas ocupa el ancho completo y compara dos paneles alineados p
 
 La tabla ajusta sus dos columnas al ancho disponible: resultado/mes/fecha ocupa el 65% y llamadas el 35%. Los nombres largos se distribuyen en varias lineas para no ocultar los valores de llamadas.
 
-El selector **Agrupar por** permite ver la tabla como Resultado / Mes / Fecha, Resultado / Estado o Estado / Resultado. El estado se obtiene de la lada del telefono con `Mae_lada.xlsx` (el maestro no incluye ciudad); los telefonos sin coincidencia quedan en **Sin cruce**.
+La tabla muestra los resultados agrupados por Resultado / Mes / Fecha. Se retiraron las visualizaciones Resultado / Estado y Estado / Resultado; el filtro global **Estado** sigue aplicando a esta pestaña y al resto del dashboard.
 
-El contenido de la pestana solo se prepara al abrirla. En esa primera carga se construyen resumenes persistentes por dia y resultado de llamada, incluyendo la dimension de estado cuando corresponde; se lee el Parquet en lotes y se muestra el avance. Las siguientes visitas reutilizan la cache SQLite en lugar de recorrer los resumenes horarios. Se conservan los filtros, clasificacion de contacto, agrupaciones y metricas existentes; cambiar `Mae_lada.xlsx` reconstruye solo el resumen por estado.
+El contenido de la pestana solo se prepara al abrirla. En esa primera carga se construyen resumenes persistentes por dia y resultado de llamada; si hay un filtro global de estado activo, tambien se incluye el estado en el resumen. Se lee el Parquet en lotes y se muestra el avance. Las siguientes visitas reutilizan la cache SQLite en lugar de recorrer los resumenes horarios. Se conservan los filtros, clasificacion de contacto, agrupacion diaria y metricas existentes.
 
 ## Filtro Estado (panel lateral)
 

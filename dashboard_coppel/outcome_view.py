@@ -25,32 +25,22 @@ def outcome_figure(table: pd.DataFrame) -> go.Figure:
     return fig
 
 
-GROUPINGS = {
-    "Resultado / Mes / Fecha": ["Call Outcome name", "month", "date"],
-    "Resultado / Estado": ["Call Outcome name", "state"],
-    "Estado / Resultado": ["state", "Call Outcome name"],
-}
+GROUPING = "Resultado / Mes / Fecha"
+DIMENSIONS = ["Call Outcome name", "month", "date"]
 
 
-def render_outcomes(table: pd.DataFrame, state_loader=None) -> None:
+def render_outcomes(table: pd.DataFrame) -> None:
     if table.empty:
         st.info("No hay llamadas para los filtros seleccionados.")
         return
-    options = list(GROUPINGS) if state_loader is not None else list(GROUPINGS)[:1]
-    grouping = st.radio("Agrupar por", options, horizontal=True, key="outcome-grouping")
-    dimensions = GROUPINGS[grouping]
-    source = table
-    if "state" in dimensions:
-        with st.spinner("Agrupando resultados por estado..."):
-            source = state_loader()
     height = max(600, table["Call Outcome name"].nunique() * 25 + 150)
     left, right = st.columns([.4, .6])
     with left:
-        display = hierarchy_rows(source, dimensions)
+        display = hierarchy_rows(table, DIMENSIONS)
         render_interactive_table(
-            display, [("label", grouping), ("calls", "Total llamadas")],
+            display, [("label", GROUPING), ("calls", "Total llamadas")],
             "Resultado llamadas", height=height, hierarchy=True, compact=True,
-            totals={"label": "Total", "calls": int(source["calls"].sum())},
+            totals={"label": "Total", "calls": int(table["calls"].sum())},
         )
     with right:
         report_chart(outcome_figure(table), height=height, left_margin=185)

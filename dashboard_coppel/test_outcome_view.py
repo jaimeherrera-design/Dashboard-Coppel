@@ -5,7 +5,6 @@ import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 import app
-from data_cache import SUMMARY_KEYS
 from outcome_view import outcome_figure, render_outcomes
 from test_data_loading import DataLoadingTests
 
@@ -32,7 +31,8 @@ class OutcomeViewTests(DataLoadingTests):
         fig = outcome_figure(result)
         self.assertEqual(list(fig.data[0].x), [2 / 3, 1 / 3])
         self.assertEqual([row[0] for row in fig.data[0].customdata], ["recordatorio", "Busy"])
-        with patch("outcome_view.render_interactive_table") as render, patch("outcome_view.report_chart"):
+        with patch("outcome_view.st.radio", side_effect=AssertionError("No hay selector de agrupación")), \
+                patch("outcome_view.render_interactive_table") as render, patch("outcome_view.report_chart"):
             render_outcomes(result)
         self.assertEqual(render.call_args.kwargs["totals"]["calls"], 3)
         self.assertTrue(render.call_args.kwargs["compact"])
@@ -42,7 +42,7 @@ class OutcomeViewTests(DataLoadingTests):
         self.filters["Campaign Name"] = ["Missing"]
         self.assertTrue(app.aggregate_outcomes(files, signature, self.filters).empty)
 
-    def test_state_filter_and_grouping_preserve_totals(self):
+    def test_state_filter_preserves_totals_without_state_grouping_views(self):
         other = {**self.row("2026-06-01 12:00:00", outcome="Busy"), "Phone": "8112345678"}
         self.write_csv("calls.csv", [self.row("2026-06-01 10:00:00"), self.row("2026-07-02 11:00:00"), other])
         files = app.discover_csv_files(self.root)
@@ -50,26 +50,25 @@ class OutcomeViewTests(DataLoadingTests):
         masters = (app.file_signature(self.did_mapping), app.file_signature(self.lada_mapping))
         base = self.result()
         self.assertEqual(base["total"], 3)
-        states = app.aggregate_outcome_states(files, signature, masters, self.filters)
-        self.assertEqual(states["calls"].sum(), 3)
-        self.assertEqual(states.groupby("state")["calls"].sum().to_dict(), {"CDMX": 2, "Sin cruce": 1})
         by_state = {}
         for state in ["CDMX", "Sin cruce"]:
             filters = {**self.filters, "State": [state], "detail_masters": masters}
             by_state[state] = app.aggregate(files, signature, app.FILTER_VERSION, filters)
-            self.assertEqual(
-                app.aggregate_outcomes(files, signature, filters)["calls"].sum(), by_state[state]["total"],
-            )
+            outcome = app.aggregate_outcomes(files, signature, filters)
+            self.assertEqual(outcome["calls"].sum(), by_state[state]["total"])
         self.assertEqual(by_state["CDMX"]["total"], 2)
         self.assertEqual(by_state["CDMX"]["contacts"], 2)
         self.assertEqual(by_state["Sin cruce"]["total"], 1)
         self.assertEqual(sum(result["total"] for result in by_state.values()), base["total"])
         outcome = app.aggregate_outcomes(files, signature, self.filters)
-        with patch("outcome_view.st.radio", return_value="Estado / Resultado"), \
+        with patch("outcome_view.st.radio", side_effect=AssertionError("No hay agrupación por estado")), \
                 patch("outcome_view.render_interactive_table") as render, patch("outcome_view.report_chart"):
-            render_outcomes(outcome, lambda: states)
+            render_outcomes(outcome)
         roots = render.call_args.args[0]
-        self.assertEqual(roots.loc[roots["_depth"].eq(0), "label"].tolist(), ["CDMX", "Sin cruce"])
+        self.assertEqual(
+            roots.loc[roots["_depth"].eq(0), "label"].tolist(),
+            ["recordatorio", "Busy"],
+        )
         self.assertEqual(render.call_args.kwargs["totals"]["calls"], 3)
 
     def test_outcome_tab_loads_lazily(self):
