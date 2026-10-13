@@ -9,6 +9,7 @@ import streamlit as st
 
 from data_cache import FileSignature, source_signature
 from interactive_table import render_interactive_table
+from mora import position, sort_by_mora
 from report_view import BLUE, LIGHT_BLUE, GREEN, presentation_metrics, report_chart
 
 
@@ -72,12 +73,15 @@ def load_detail_masters(did_signature: FileSignature, lada_signature: FileSignat
     return did.drop_duplicates("DDI").set_index("DDI"), lada.drop_duplicates("NIR").set_index("NIR")["ESTADO"].to_dict()
 
 
+def phone_state(prefix: pd.Series, ladas: dict) -> pd.Series:
+    return prefix.map(ladas).fillna(prefix.str[:2].map(ladas)).fillna(UNMAPPED)
+
+
 def classify_detail(chunk: pd.DataFrame, did: pd.DataFrame, ladas: dict) -> pd.DataFrame:
     chunk = chunk.copy()
     chunk["did"] = chunk["DDI"].map(did["HOMOLOGACION"]).fillna(UNMAPPED)
     chunk["provider"] = chunk["DDI"].map(did["NOMBRE"]).fillna(UNMAPPED)
-    prefix = chunk["phone_prefix"]
-    chunk["state"] = prefix.map(ladas).fillna(prefix.str[:2].map(ladas)).fillna(UNMAPPED)
+    chunk["state"] = phone_state(chunk["phone_prefix"], ladas)
     chunk["month"] = chunk["Call end"].dt.to_period("M").astype(str)
     return chunk
 
@@ -93,6 +97,8 @@ def hierarchy_rows(table: pd.DataFrame, dimensions: list[str]) -> pd.DataFrame:
 
     def visit(frame, level, parent):
         grouped = frame.groupby(dimensions[level], as_index=False)[METRICS].sum().sort_values("calls", ascending=False)
+        if dimensions[level] == "Campaign Name":
+            grouped = sort_by_mora(grouped)
         for _, row in grouped.iterrows():
             identifier = str(len(rows))
             label = str(row[dimensions[level]])
@@ -123,6 +129,13 @@ def detail_table(table: pd.DataFrame, dimensions: list[str], title: str, height:
         render_interactive_table(display, columns, title, height=height, hierarchy=True, totals=totals)
 
 
+def mora_first(frame: pd.DataFrame) -> pd.DataFrame:
+    """Rows of the altura de mora level always follow the master's Posicion."""
+    if not frame.empty and frame["label"].map(lambda label: position(label)[0] != float("inf")).any():
+        return sort_by_mora(frame, "label")
+    return frame
+
+
 def select_detail_rows(display: pd.DataFrame, query: str, depth: int, sort_key: str, ascending: bool) -> pd.DataFrame:
     query = query.strip().casefold()
     by_id = display.set_index("_id")
@@ -137,7 +150,7 @@ def select_detail_rows(display: pd.DataFrame, query: str, depth: int, sort_key: 
                 included.add(identifier)
                 identifier = by_id.at[identifier, "_parent"]
     children = {
-        parent: frame.sort_values(sort_key, ascending=ascending, kind="stable")
+        parent: mora_first(frame.sort_values(sort_key, ascending=ascending, kind="stable"))
         for parent, frame in display.groupby("_parent", sort=False)
     }
     identifiers = []
@@ -291,13 +304,13 @@ def render_detail(result: dict, totals: dict) -> None:
         return
     section = st.selectbox(
         "Componente del detalle",
-        ["DID / Mes / Proveedor", "DID / Campaña / Mes",
+        ["DID / Mes / Proveedor", "DID / Altura de mora / Mes",
          "Volumen por DID", "Estado / Mes / Proveedor", "TMO / Contactabilidad por estado"],
         key="detail-render-section",
     )
     if section == "DID / Mes / Proveedor":
         detail_table(result["did_month"], ["did", "month", "provider"], section, height=700, page_size=100)
-    elif section == "DID / Campaña / Mes":
+    elif section == "DID / Altura de mora / Mes":
         detail_table(result["did_campaign"], ["did", "Campaign Name", "month"], section, height=700, performance=False, page_size=100)
     elif section == "Volumen por DID":
         report_chart(did_volume_figure(result["did"]), 380)

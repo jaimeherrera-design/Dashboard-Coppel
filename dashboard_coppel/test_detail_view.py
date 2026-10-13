@@ -197,7 +197,7 @@ detail_table(table, ["did", "month", "provider"], "Detalle", height=700, page_si
                     if isinstance(value, pd.DataFrame)}
         sections = [
             ("DID / Mes / Proveedor", "did_month"),
-            ("DID / Campaña / Mes", "did_campaign"),
+            ("DID / Altura de mora / Mes", "did_campaign"),
             ("Volumen por DID", None),
             ("Estado / Mes / Proveedor", "state_month"),
             ("TMO / Contactabilidad por estado", None),

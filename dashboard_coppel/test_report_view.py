@@ -12,6 +12,16 @@ from interactive_table import table_html
 
 
 class ReportViewTests(test_data_loading.DataLoadingTests):
+    def test_period_selectors_map_to_date_range(self):
+        from datetime import date
+        lo, hi = date(2026, 6, 15), date(2026, 10, 8)
+        self.assertEqual(app.period_bounds(lo, hi), (lo, hi))
+        self.assertEqual(app.period_bounds(lo, hi, 2026), (lo, hi))
+        self.assertEqual(app.period_bounds(lo, hi, 2026, 6), (lo, date(2026, 6, 30)))
+        self.assertEqual(app.period_bounds(lo, hi, 2026, 9), (date(2026, 9, 1), date(2026, 9, 30)))
+        self.assertEqual(app.period_bounds(lo, hi, 2026, 10), (date(2026, 10, 1), hi))
+        self.assertEqual(app.period_bounds(lo, hi, 2026, 7, date(2026, 7, 4)), (date(2026, 7, 4), date(2026, 7, 4)))
+
     def test_visual_rates_and_hourly_detail_preserve_totals(self):
         self.write_csv("calls.csv", [
             self.row("2026-06-01 10:01:00", talk=4),
@@ -118,17 +128,30 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
         self.assertEqual(fig.data[1].customdata[1][0], names[1])
         pd.testing.assert_frame_equal(table, original)
 
+    def test_idle_and_tmo_kpis_only_measure_dialer_calls(self):
+        types = pd.DataFrame({
+            "Call Type": ["dialer", " Manual", "PREVIEW", "Vista previa", "dialer-pp"],
+            "calls": [10, 5, 5, 5, 0], "contacts": [1, 1, 1, 1, 0],
+            "talk_sum": [20.0, 500, 500, 500, 0], "wrap_sum": [10.0, 50, 50, 50, 0], "wait_sum": [40.0, 900, 900, 900, 0],
+        })
+        self.assertEqual(app.dialer_kpis(types), (4.0, 3.0))
+        self.assertEqual(app.dialer_kpis(types.iloc[1:4]), (None, None))
+        self.assertEqual(app.dialer_kpis(types.iloc[:0]), (None, None))
+
     def test_ui_keeps_exact_kpi_labels_and_values(self):
         self.write_csv("calls.csv", [
             self.row("2026-06-01 10:00:00", talk=2),
             self.row("2026-06-02 11:00:00", outcome="Busy", talk=6),
         ])
+        mora = self.root / "Mae_Mora.xlsx"
+        pd.DataFrame({"Campaña": ["Cobranza"], "ALTURA DE MORA": ["MORA 1"], "Posicion": [1]}).to_excel(mora, index=False)
         sources = SimpleNamespace(
             parquet=app.discover_csv_files(self.root),
             masters={
                 "Mae_contacto.xlsx": app.file_signature(self.mapping),
                 "Mae_did.xlsx": app.file_signature(self.did_mapping),
                 "Mae_lada.xlsx": app.file_signature(self.lada_mapping),
+                "Mae_Mora.xlsx": app.file_signature(mora),
             },
         )
         with patch.object(app, "DATA_ROOT", self.root), patch.object(app, "discover_drive_sources", return_value=sources):

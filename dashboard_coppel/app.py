@@ -3,6 +3,8 @@ from html import escape
 from io import BytesIO
 from base64 import b64encode
 from zipfile import BadZipFile
+import hashlib
+import json
 import sqlite3
 
 import pandas as pd
@@ -19,10 +21,11 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.util import Inches, Pt
 from data_cache import load_summary, iter_summary, SUMMARY_KEYS
 from report_view import PLOT_CONFIG, render_report
-from detail_view import DETAIL_VERSION, numeric_code, phone_prefix, load_detail_masters, classify_detail, combine_groups, render_detail
+from detail_view import DETAIL_VERSION, UNMAPPED, numeric_code, phone_prefix, phone_state, load_detail_masters, classify_detail, combine_groups, render_detail
 from outcome_view import render_outcomes
 from contact_analysis import render_contact_analysis
-from drive_sources import discover_drive_sources, DRIVE_FOLDER_ID
+from drive_sources import discover_drive_sources
+from mora import MORA_FILE, map_campaigns, read_mora_master, set_order, sorted_moras
 from streamlit.errors import StreamlitSecretNotFoundError
 
 
@@ -51,8 +54,10 @@ REQUIRED_COLUMNS = [
     "Call Outcome name",
 ]
 EXCLUDED_CAMPAIGN_PATTERN = r"test|prueba"
+NOT_DIALER_CALL_TYPES = {"manual", "preview", "vista previa"}
 FILTER_VERSION = "campaign-exclusion-v8-persistent-source-summaries"
 GROUP_METRICS = ["calls", "contacts", "talk_sum", "wrap_sum", "wait_sum"]
+STATE_VERSION = "state-hourly-v1"
 PPT_NAVY = RGBColor(244, 247, 251)
 PPT_SURFACE = RGBColor(255, 255, 255)
 PPT_LINE = RGBColor(218, 228, 238)
@@ -106,6 +111,20 @@ def style_dashboard() -> None:
         .insight-card-finding, .insight-card-action { color:#61758e; font-size:.9rem; line-height:1.45; margin-top:10px; }
         .insight-card-finding strong, .insight-card-action strong { color:var(--ink); }
         @media (max-width: 900px) { .insight-grid { grid-template-columns:1fr; } }
+        .decision-alert { background:#fbe8e6; border-left:5px solid #d9574f; border-radius:8px; padding:12px 16px; margin:0 0 14px; color:#7a2620; }
+        .decision-card { min-height:270px; margin-bottom:14px; background:#fff; border:1px solid var(--line); border-left:6px solid #6d7d84; border-radius:12px; padding:16px 18px; box-shadow:0 8px 24px rgba(20,55,95,.07); }
+        .decision-card.red { border-left-color:#d9574f; background:linear-gradient(180deg,#fff6f5 0,#fff 90px); }
+        .decision-card.amber { border-left-color:#d99a2b; background:linear-gradient(180deg,#fffaf0 0,#fff 90px); }
+        .decision-card.green { border-left-color:#2d9d78; background:linear-gradient(180deg,#f3fbf7 0,#fff 90px); }
+        .decision-head { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+        .decision-icon { font-size:1.35rem; line-height:1; }
+        .decision-tag { font-size:.72rem; font-weight:800; letter-spacing:.1em; }
+        .red .decision-tag { color:#b23a32; } .amber .decision-tag { color:#9a6a12; } .green .decision-tag { color:#1f7a5b; }
+        .decision-title { font-family:'Space Grotesk', sans-serif; font-size:1.02rem; font-weight:700; color:var(--ink); margin-bottom:8px; }
+        .decision-finding { color:#40566f; font-size:.9rem; line-height:1.45; margin-bottom:10px; }
+        .decision-do, .decision-dont { font-size:.88rem; line-height:1.4; padding:7px 10px; border-radius:8px; margin-top:6px; }
+        .decision-do { background:#e3f4ed; color:#1d5e47; }
+        .decision-dont { background:#fbe8e6; color:#7a2620; }
         [data-testid="stAppViewContainer"] { background:linear-gradient(180deg,#edf3fb 0,#f5f7fb 460px); }
         [data-testid="stHeader"] { background:rgba(237,243,251,.95); }
         .block-container { padding-top:2rem; max-width:1600px; }
@@ -240,7 +259,7 @@ def read_source_chunks(files: tuple[FileSignature, ...], status=None, *, detail:
             raise ValueError(f"La fuente cambió durante la carga: {path.name}. Actualiza las fuentes.")
 
 
-def scan_metadata(files: tuple[FileSignature, ...], status=None) -> dict:
+def scan_metadata(files: tuple[FileSignature, ...], status=None, mora_signature: FileSignature | None = None) -> dict:
     options = {name: set() for name in ["Call Type", "Campaign Name", "Term Reason"]}
     minimum = None
     maximum = None
@@ -250,6 +269,7 @@ def scan_metadata(files: tuple[FileSignature, ...], status=None) -> dict:
                 EXCLUDED_CAMPAIGN_PATTERN, case=False, na=False
             )
         ]
+        chunk = apply_mora(chunk.copy(), {"mora_master": mora_signature})
         dates = pd.to_datetime(chunk["Call end"], errors="coerce")
         if dates.notna().any():
             minimum = dates.min() if minimum is None else min(minimum, dates.min())
@@ -258,7 +278,27 @@ def scan_metadata(files: tuple[FileSignature, ...], status=None) -> dict:
             options[name].update(chunk[name].unique())
     if status is not None:
         status.update(label="Metadatos listos", state="complete")
-    return {"options": {key: sorted(value) for key, value in options.items()}, "minimum": minimum, "maximum": maximum}
+    options = {key: sorted(value) for key, value in options.items()}
+    if mora_signature is not None:
+        options["Campaign Name"] = sorted_moras(options["Campaign Name"])
+    return {"options": options, "minimum": minimum, "maximum": maximum}
+
+
+@st.cache_data(show_spinner="Cargando alturas de mora...")
+def load_mora(mora_signature: FileSignature) -> tuple[dict[str, str], dict[str, float]]:
+    mapping, order = read_mora_master(mora_signature[0])
+    if file_signature(Path(mora_signature[0])) != mora_signature:
+        raise ValueError(f"{MORA_FILE} cambió durante la carga. Actualiza las fuentes.")
+    return mapping, order
+
+
+def apply_mora(chunk: pd.DataFrame, filters: dict) -> pd.DataFrame:
+    mora_signature = filters.get("mora_master")
+    if mora_signature is None:
+        return chunk
+    mapping, _ = load_mora(mora_signature)
+    chunk["Campaign Name"] = map_campaigns(chunk["Campaign Name"], mapping, EXCLUDED_CAMPAIGN_PATTERN)
+    return chunk
 
 
 @st.cache_data(show_spinner="Cargando clasificación de Contacto/No Contacto...")
@@ -287,8 +327,8 @@ def load_contact_outcomes(mapping_signature: FileSignature) -> set[str]:
 
 
 @st.cache_data(show_spinner=False)
-def dashboard_metadata(files: tuple[FileSignature, ...], version: str) -> dict:
-    return scan_metadata(files)
+def dashboard_metadata(files: tuple[FileSignature, ...], version: str, mora_signature: FileSignature | None = None) -> dict:
+    return scan_metadata(files, mora_signature=mora_signature)
 
 
 def clean_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
@@ -302,7 +342,13 @@ def clean_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
     return chunk
 
 
-def read_source_summaries(files: tuple[FileSignature, ...], status=None):
+def read_source_summaries(files: tuple[FileSignature, ...], status=None, filters: dict | None = None):
+    states = (filters or {}).get("State")
+    if states:
+        _, ladas = load_detail_masters(*filters["detail_masters"])
+        for summary in read_state_summaries(files, ladas, status, states):
+            yield summary.drop(columns="state")
+        return
     for signature in files:
         summary = load_summary(
             signature,
@@ -311,6 +357,30 @@ def read_source_summaries(files: tuple[FileSignature, ...], status=None):
         )
         summary["Call end"] = pd.to_datetime(summary["Call end"], errors="coerce")
         yield summary
+
+
+def state_version(ladas: dict) -> str:
+    digest = hashlib.sha256(json.dumps(sorted(ladas.items())).encode("utf-8")).hexdigest()[:16]
+    return f"{STATE_VERSION}-{digest}"
+
+
+def read_state_summaries(files: tuple[FileSignature, ...], ladas: dict, status=None, states=None):
+    def chunks(signature):
+        for raw in read_source_chunks((signature,), status, detail=True):
+            chunk = clean_chunk(raw)
+            chunk["state"] = phone_state(chunk["Phone"].fillna("").map(phone_prefix), ladas)
+            yield chunk.drop(columns=["Phone", "DDI"])
+
+    version = state_version(ladas)
+    for signature in files:
+        for summary in iter_summary(
+            signature, lambda: chunks(signature), status,
+            keys=SUMMARY_KEYS + ["state"], version=version, namespace=STATE_VERSION,
+            batch_size=250_000, date_format="%Y-%m-%d %H:00:00",
+            where=("state", list(states)) if states else None,
+        ):
+            summary["Call end"] = pd.to_datetime(summary["Call end"], errors="coerce")
+            yield summary
 
 
 def read_detail_summaries(files: tuple[FileSignature, ...], status=None):
@@ -347,11 +417,16 @@ def aggregate_detail(files: tuple[FileSignature, ...], contact_signature: FileSi
     for chunk in read_detail_summaries(files, _status):
         if _status is not None:
             _status.update(label="Aplicando filtros y agrupando DID / Estado...", state="running")
+        chunk = apply_mora(chunk, filters)
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
             continue
         chunk["contacts"] = chunk["calls"] * chunk["Call Outcome name"].str.casefold().isin(outcomes).astype(int)
         chunk = classify_detail(chunk, did, ladas)
+        if filters.get("State"):
+            chunk = chunk.loc[chunk["state"].isin(filters["State"])]
+            if chunk.empty:
+                continue
         unmapped_did += int(chunk.loc[chunk["did"].eq("Sin cruce"), "calls"].sum())
         unmapped_state += int(chunk.loc[chunk["state"].eq("Sin cruce"), "calls"].sum())
         for key, group in dimensions.items():
@@ -390,7 +465,8 @@ def aggregate_contact_analysis(files: tuple[FileSignature, ...], mapping_signatu
         raise ValueError("El maestro de contactos cambió durante la lectura. Recarga el dashboard.")
     parts = []
     dimensions = ["Campaign Name", "Call Type", "Call Outcome name", "mapped"]
-    for chunk in read_source_summaries(files):
+    for chunk in read_source_summaries(files, filters=filters):
+        chunk = apply_mora(chunk, filters)
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
             continue
@@ -403,12 +479,47 @@ def aggregate_contact_analysis(files: tuple[FileSignature, ...], mapping_signatu
     return pd.concat(parts).groupby(dimensions, as_index=False)[["calls", "contacts"]].sum()
 
 
+def unmapped_outcomes(analysis: pd.DataFrame) -> pd.DataFrame:
+    columns = ["Call Outcome name", "Contacto / No Contacto", "Llamadas", "Alturas de mora"]
+    pending = analysis.loc[~analysis["mapped"].astype(bool)].copy()
+    pending["Call Outcome name"] = pending["Call Outcome name"].fillna("").astype(str).str.strip()
+    pending = pending.loc[pending["Call Outcome name"].ne("")]
+    if pending.empty:
+        return pd.DataFrame(columns=columns)
+    pending["key"] = pending["Call Outcome name"].str.casefold()
+    spelling = (pending.groupby(["key", "Call Outcome name"], as_index=False)["calls"].sum()
+                .sort_values("calls", ascending=False).drop_duplicates("key"))
+    grouped = pending.groupby("key").agg(Llamadas=("calls", "sum"), **{"Alturas de mora": ("Campaign Name", "nunique")}).reset_index()
+    grouped = grouped.merge(spelling[["key", "Call Outcome name"]], on="key")
+    grouped["Contacto / No Contacto"] = ""
+    return grouped.sort_values("Llamadas", ascending=False)[columns].reset_index(drop=True)
+
+
+def unmapped_outcomes_excel(table: pd.DataFrame) -> bytes:
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        table.to_excel(writer, index=False, sheet_name="Sin maestro")
+    return buffer.getvalue()
+
+
+@st.cache_data(show_spinner=False, max_entries=2)
+def recurrence_pdf(files: tuple[FileSignature, ...], mapping_signature: FileSignature, start, end,
+                   mora_signature: FileSignature | None = None) -> tuple[bytes, bytes]:
+    from recurrence_report import generate_report
+
+    csv_name = f"Recurrencia_Intentos_{start:%Y%m%d}_{end:%Y%m%d}_ilocalizables_cronicos.csv"
+    return generate_report([Path(item[0]) for item in files], Path(mapping_signature[0]), start, end,
+                           csv_name=csv_name, log=lambda _: None,
+                           mora=Path(mora_signature[0]) if mora_signature else None)
+
+
 @st.cache_data(show_spinner=False)
 def aggregate_outcomes(files: tuple[FileSignature, ...], mapping_signature: FileSignature, filters: dict) -> pd.DataFrame:
     parts = []
     outcomes = load_contact_outcomes(mapping_signature)
     dimensions = ["Call Outcome name", "month", "date"]
-    for chunk in read_source_summaries(files):
+    for chunk in read_source_summaries(files, filters=filters):
+        chunk = apply_mora(chunk, filters)
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
             continue
@@ -420,10 +531,28 @@ def aggregate_outcomes(files: tuple[FileSignature, ...], mapping_signature: File
 
 
 @st.cache_data(show_spinner=False)
+def aggregate_outcome_states(files: tuple[FileSignature, ...], mapping_signature: FileSignature,
+                             detail_masters: tuple[FileSignature, FileSignature], filters: dict) -> pd.DataFrame:
+    parts = []
+    outcomes = load_contact_outcomes(mapping_signature)
+    _, ladas = load_detail_masters(*detail_masters)
+    dimensions = ["Call Outcome name", "state"]
+    for chunk in read_state_summaries(files, ladas, states=filters.get("State")):
+        chunk = apply_mora(chunk, filters)
+        chunk = chunk.loc[selected_mask(chunk, filters)].copy()
+        if chunk.empty:
+            continue
+        chunk["contacts"] = chunk["calls"] * chunk["Call Outcome name"].str.casefold().isin(outcomes).astype(int)
+        parts.append(chunk.groupby(dimensions, as_index=False)[GROUP_METRICS].sum())
+    return combine_groups(parts, dimensions)
+
+
+@st.cache_data(show_spinner=False)
 def contact_hourly_days(files: tuple[FileSignature, ...], mapping_signature: FileSignature, filters: dict) -> pd.DataFrame:
     parts = []
     outcomes = load_contact_outcomes(mapping_signature)
-    for chunk in read_source_summaries(files):
+    for chunk in read_source_summaries(files, filters=filters):
+        chunk = apply_mora(chunk, filters)
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
             continue
@@ -443,7 +572,8 @@ def aggregate(files: tuple[FileSignature, ...], mapping_signature: FileSignature
     by_call_type, by_campaign, by_term = [], [], []
     heat = []
     contact_outcomes = load_contact_outcomes(mapping_signature)
-    for chunk in read_source_summaries(files):
+    for chunk in read_source_summaries(files, filters=filters):
+        chunk = apply_mora(chunk, filters)
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
             continue
@@ -483,6 +613,18 @@ def fmt_number(value: float) -> str:
     return f"{value:,.0f}".replace(",", ".")
 
 
+def dialer_kpis(call_types: pd.DataFrame) -> tuple[float | None, float | None]:
+    """Idle y TMO de las tarjetas KPI: solo llamadas de marcador; manual y preview/vista previa no se miden."""
+    if call_types.empty:
+        return None, None
+    kind = call_types["Call Type"].fillna("").astype(str).str.strip().str.casefold()
+    dialer = call_types.loc[~kind.isin(NOT_DIALER_CALL_TYPES)]
+    calls = dialer["calls"].sum()
+    if not calls:
+        return None, None
+    return dialer["wait_sum"].sum() / calls, (dialer["talk_sum"].sum() + dialer["wrap_sum"].sum()) / calls
+
+
 def render_kpi_card(label: str, value: str, icon: str, gold: bool = False) -> None:
     icons = {
         "calls": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13v-2a8 8 0 0 1 16 0v2"/><rect x="2" y="11" width="5" height="8" rx="2"/><rect x="17" y="11" width="5" height="8" rx="2"/><path d="M20 19v1a2 2 0 0 1-2 2h-4"/></svg>',
@@ -509,17 +651,6 @@ def insight_dimension(result: dict, total: int, key: str, label: str) -> pd.Data
     table["dimension_label"] = label
     table["share"] = table["calls"] / max(total, 1)
     return table
-
-
-def render_insight_card(status: str, title: str, finding: str, action: str) -> None:
-    st.markdown(
-        f'''<div class="insight-card {status}">
-            <div class="insight-card-title"><span class="traffic-light"></span>{escape(title)}</div>
-            <div class="insight-card-finding"><strong>Hallazgo:</strong> {escape(finding)}</div>
-            <div class="insight-card-action"><strong>Qué hacer:</strong> {escape(action)}</div>
-        </div>''',
-        unsafe_allow_html=True,
-    )
 
 
 def style_chart(fig, height: int) -> None:
@@ -764,6 +895,50 @@ def build_pptx(result, filters, total, contact_rate, idle, tmo) -> bytes:
     return output.getvalue()
 
 
+MONTH_NAMES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto",
+               "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+ALL_OPTION = "Todos"
+
+
+def period_bounds(date_min, date_max, year=ALL_OPTION, month=ALL_OPTION, day=ALL_OPTION):
+    """Convierte Año / Mes / Fecha en el rango inicio-fin, limitado a las fechas con datos."""
+    if day != ALL_OPTION:
+        return day, day
+    if year == ALL_OPTION:
+        return date_min, date_max
+    if month == ALL_OPTION:
+        start, end = pd.Timestamp(year, 1, 1).date(), pd.Timestamp(year, 12, 31).date()
+    else:
+        first = pd.Timestamp(year, month, 1)
+        start, end = first.date(), (first + pd.offsets.MonthEnd(0)).date()
+    return max(start, date_min), min(end, date_max)
+
+
+def select_period(date_min, date_max) -> dict:
+    st.sidebar.markdown("**Periodo**")
+    year_col, month_col = st.sidebar.columns(2)
+    years = list(range(date_min.year, date_max.year + 1))
+    year = year_col.selectbox("Año", [ALL_OPTION] + years, key="period-year")
+    month = ALL_OPTION
+    if year != ALL_OPTION:
+        months = [m for m in range(1, 13) if pd.Timestamp(year, m, 1).date() <= date_max
+                  and (pd.Timestamp(year, m, 1) + pd.offsets.MonthEnd(0)).date() >= date_min]
+        month = month_col.selectbox("Mes", [ALL_OPTION] + months, key="period-month",
+                                    format_func=lambda m: m if m == ALL_OPTION else MONTH_NAMES[m - 1])
+    else:
+        month_col.selectbox("Mes", [ALL_OPTION], key="period-month-disabled", disabled=True)
+    day = ALL_OPTION
+    if month != ALL_OPTION:
+        start, end = period_bounds(date_min, date_max, year, month)
+        days = list(pd.date_range(start, end, freq="D").date)
+        day = st.sidebar.selectbox("Fecha", [ALL_OPTION] + days, key="period-day",
+                                   format_func=lambda d: "Todas" if d == ALL_OPTION else f"{d:%d/%m/%Y}")
+    else:
+        st.sidebar.selectbox("Fecha", ["Todas"], key="period-day-disabled", disabled=True)
+    start, end = period_bounds(date_min, date_max, year, month, day)
+    return {"start": start, "end": end}
+
+
 def main() -> None:
     style_dashboard()
     st.sidebar.markdown("## COPPEL\n### Contact Center Intelligence")
@@ -776,13 +951,15 @@ def main() -> None:
         with st.status("Consultando Parquet y maestros en Google Drive...", expanded=False) as drive_status:
             sources = discover_drive_sources(DATA_ROOT, drive_status, service_account_info=account_info)
             files = sources.parquet
-            drive_status.update(label=f"Drive sincronizado: {len(files)} Parquet y 3 maestros", state="complete")
+            drive_status.update(label=f"Drive sincronizado: {len(files)} Parquet y {len(sources.masters)} maestros", state="complete")
         mapping_signature = sources.masters["Mae_contacto.xlsx"]
         load_contact_outcomes(mapping_signature)
-        metadata_signature = (FILTER_VERSION, files)
+        mora_signature = sources.masters[MORA_FILE]
+        set_order(load_mora(mora_signature)[1])
+        metadata_signature = (FILTER_VERSION, files, mora_signature)
         if st.session_state.get("metadata_signature") != metadata_signature:
             with st.spinner("Preparando la base de datos..."):
-                metadata = dashboard_metadata(files, FILTER_VERSION)
+                metadata = dashboard_metadata(files, FILTER_VERSION, mora_signature)
             st.session_state["source_metadata"] = metadata
             st.session_state["metadata_signature"] = metadata_signature
         else:
@@ -795,23 +972,22 @@ def main() -> None:
         st.stop()
     date_min = metadata["minimum"].date()
     date_max = metadata["maximum"].date()
-    date_range = st.sidebar.date_input("Periodo", value=(date_min, date_max), min_value=date_min, max_value=date_max)
-    if len(date_range) != 2:
-        st.warning("Selecciona una fecha inicial y una fecha final.")
-        st.stop()
-    filters = {"start": date_range[0], "end": date_range[1]}
-    for field, label in [("Call Type", "Call type"), ("Campaign Name", "Campaign name"), ("Term Reason", "Term reason")]:
+    filters = select_period(date_min, date_max)
+    filters["mora_master"] = mora_signature
+    for field, label in [("Call Type", "Call type"), ("Campaign Name", "Altura de mora"), ("Term Reason", "Term reason")]:
         filters[field] = st.sidebar.multiselect(label, metadata["options"][field], default=[])
-    st.sidebar.divider()
-    st.sidebar.caption(
-        "Se suman todos los Parquet de la carpeta privada de Google Drive al abrir o recargar. Los archivos de la raíz y las subcarpetas no se incluyen."
-    )
-    st.sidebar.markdown(f"[Carpeta de fuentes en Drive](https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID})")
-    with st.sidebar.expander("Fuentes incluidas"):
-        for file_path, _, _ in files:
-            st.caption(Path(file_path).name)
-        for name in sources.masters:
-            st.caption(f"Maestro en Drive: {name}")
+    detail_masters = (sources.masters["Mae_did.xlsx"], sources.masters["Mae_lada.xlsx"])
+    try:
+        _, ladas = load_detail_masters(*detail_masters)
+        state_options = sorted(set(ladas.values())) + [UNMAPPED]
+    except (OSError, ValueError, ImportError, BadZipFile) as exc:
+        state_options = []
+        st.sidebar.caption(f"Filtro de estado no disponible: {exc}")
+    if state_options:
+        states = st.sidebar.multiselect("Estado", state_options, default=[])
+        if states:
+            filters["State"] = states
+            filters["detail_masters"] = detail_masters
 
     try:
         result = aggregate(files, mapping_signature, FILTER_VERSION, filters)
@@ -820,20 +996,48 @@ def main() -> None:
         st.stop()
     total = result["total"]
     contact_rate = result["contacts"] / total if total else 0
-    idle = result["wait_sum"] / total if total else 0
-    tmo = (result["talk_sum"] + result["wrap_sum"]) / total if total else 0
+    tmo =  (result["talk_sum"] + result["wrap_sum"]) / total if total else 0
+    kpi_idle, kpi_tmo = dialer_kpis(result["call_type"])
     st.sidebar.divider()
     st.sidebar.markdown("### Exportar reporte")
-    if st.sidebar.button("Generar PPT ejecutiva", use_container_width=True):
-        with st.spinner("Construyendo presentación..."):
-            ppt_data = build_pptx(result, filters, total, contact_rate, idle, tmo)
-        st.sidebar.download_button(
-            "Descargar PPTX",
-            data=ppt_data,
-            file_name=f"Coppel_Reporte_Ejecutivo_{filters['end'].strftime('%Y%m%d')}.pptx",
-            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            use_container_width=True,
-        )
+    if st.sidebar.button("Generar PDF recurrencia", use_container_width=True,
+                         help="Análisis de recurrencia e intentos por teléfono del periodo seleccionado (ilocalizables, "
+                              "marcaciones hasta contacto y 6 insights semaforizados)."):
+        try:
+            with st.spinner("Analizando llamadas por teléfono y construyendo el PDF..."):
+                pdf_data, csv_data = recurrence_pdf(files, mapping_signature, filters["start"], filters["end"], mora_signature)
+        except (OSError, ValueError, ImportError, MemoryError, pa.ArrowException) as exc:
+            st.sidebar.error(f"No se pudo generar el PDF: {exc}")
+        else:
+            stamp = f"{filters['start']:%Y%m%d}_{filters['end']:%Y%m%d}"
+            st.sidebar.download_button(
+                "Descargar PDF", data=pdf_data, file_name=f"Recurrencia_Intentos_{stamp}.pdf",
+                mime="application/pdf", use_container_width=True,
+            )
+            st.sidebar.download_button(
+                "Descargar ilocalizables crónicos (CSV)", data=csv_data,
+                file_name=f"Recurrencia_Intentos_{stamp}_ilocalizables_cronicos.csv",
+                mime="text/csv", use_container_width=True,
+            )
+    if st.sidebar.button("Exportar resultados sin maestro", use_container_width=True,
+                         help="Resultados de llamada únicos que no están en Mae_contacto.xlsx, con los filtros activos."):
+        try:
+            with st.spinner("Buscando resultados sin maestro..."):
+                pending = unmapped_outcomes(aggregate_contact_analysis(files, mapping_signature, filters))
+        except (OSError, ValueError, ImportError, BadZipFile, sqlite3.Error, pd.errors.DatabaseError) as exc:
+            st.sidebar.error(f"No se pudo generar el log: {exc}")
+        else:
+            if pending.empty:
+                st.sidebar.success("Todos los resultados de llamada están en Mae_contacto.")
+            else:
+                st.sidebar.caption(f"{len(pending)} resultados únicos sin maestro.")
+                st.sidebar.download_button(
+                    "Descargar log (Excel)",
+                    data=unmapped_outcomes_excel(pending),
+                    file_name=f"Resultados_sin_maestro_{filters['end'].strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
     render_executive_banner(filters)
     kpis = st.columns(5)
     with kpis[0]:
@@ -843,9 +1047,9 @@ def main() -> None:
     with kpis[2]:
         render_kpi_card("% de contactos", f"{contact_rate:.2%}", "rate")
     with kpis[3]:
-        render_kpi_card("Idle time promedio", f"{idle:.1f} s", "idle")
+        render_kpi_card("Idle time promedio", "N/A" if kpi_idle is None else f"{kpi_idle:.1f} s", "idle")
     with kpis[4]:
-        render_kpi_card("TMO", f"{tmo:.1f} s", "tmo", True)
+        render_kpi_card("TMO", "N/A" if kpi_tmo is None else f"{kpi_tmo:.1f} s", "tmo", True)
 
     principal, detail, outcomes, analysis = st.tabs(
         ["DASHBOARD PRINCIPAL", "DETALLE DID / ESTADO", "RESULTADO LLAMADAS", "ANÁLISIS CONTACTABILIDAD"], key="dashboard-pages", on_change="rerun",
@@ -875,7 +1079,10 @@ def main() -> None:
                 try:
                     with st.spinner("Preparando resultados de llamadas..."):
                         outcome_result = aggregate_outcomes(files, mapping_signature, filters)
-                    render_outcomes(outcome_result)
+                    render_outcomes(
+                        outcome_result,
+                        lambda: aggregate_outcome_states(files, mapping_signature, detail_masters, filters),
+                    )
                 except (OSError, ValueError, ImportError, BadZipFile, sqlite3.Error, pd.errors.DatabaseError) as exc:
                     st.error(f"No se pudieron cargar los resultados de llamadas: {exc}")
     if analysis.open:
@@ -944,7 +1151,7 @@ def render_principal(result: dict, files: tuple[FileSignature, ...], mapping_sig
                 hover_data={"segment":False, "tmo":":.1f", "contact_rate":":.1%", "calls":":,.0f", "idle":":.1f"},
                 color_discrete_map=segment_colors,
                 labels={"tmo":"TMO (segundos)", "contact_rate":"Contactabilidad", "calls":"Llamadas", "idle":"Idle (segundos)", "segment":"Clasificación"},
-                title="TMO y contactabilidad por campaña: cuartiles y zonas de acción",
+                title="TMO y contactabilidad por altura de mora: cuartiles y zonas de acción",
             )
             fig.update_traces(marker=dict(line=dict(width=1, color="#ffffff"), opacity=.85))
             fig.add_vline(x=tmo, line_dash="dash", line_color="#0056a6", annotation_text=f"TMO promedio: {tmo:.1f} s", annotation_position="top left")
@@ -966,22 +1173,13 @@ def render_principal(result: dict, files: tuple[FileSignature, ...], mapping_sig
             benchmark = int(campaign_scatter["segment"].eq("Benchmark: alto contacto / bajo TMO").sum())
             potential = int(campaign_scatter["segment"].eq("Potencial: alto contacto / alto TMO").sum())
             st.markdown(
-                f'<div class="insight"><strong>Lectura analítica:</strong> {critical} campaña(s) están en zona crítica y deben priorizar reducción de TMO y revisión de horario/script; {potential} tienen buen contacto pero consumen demasiado tiempo; {benchmark} son benchmark para replicar por su combinación de contacto y eficiencia.</div>',
+                f'<div class="insight"><strong>Lectura analítica:</strong> {critical} altura(s) de mora están en zona crítica y deben priorizar reducción de TMO y revisión de horario/script; {potential} tienen buen contacto pero consumen demasiado tiempo; {benchmark} son benchmark para replicar por su combinación de contacto y eficiencia.</div>',
                 unsafe_allow_html=True,
             )
         else:
-            st.info("No hay campañas con volumen suficiente para comparar TMO y contactabilidad.")
+            st.info("No hay alturas de mora con volumen suficiente para comparar TMO y contactabilidad.")
     else:
-        st.info("No hay campañas disponibles para comparar TMO y contactabilidad.")
-
-    insight_cards = insight_records(result, total, tmo, contact_rate)
-    st.markdown('<div class="section-title">Insights ejecutivos y oportunidades de mejora</div>', unsafe_allow_html=True)
-    status_order = {"red": 0, "amber": 1, "green": 2}
-    insight_cards.sort(key=lambda card: status_order[card[0]])
-    insight_columns = st.columns(3)
-    for column, card in zip(insight_columns, insight_cards):
-        with column:
-            render_insight_card(*card)
+        st.info("No hay alturas de mora disponibles para comparar TMO y contactabilidad.")
 
 
 if __name__ == "__main__":

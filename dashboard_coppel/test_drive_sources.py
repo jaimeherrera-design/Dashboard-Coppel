@@ -71,7 +71,7 @@ class DriveSourcesTests(unittest.TestCase):
     def test_masters_required_unique_and_excel_not_google_sheets(self):
         session = Session()
         self.add_masters(session)
-        self.assertEqual(len(list_sources(session, "folder", include_masters=True)), 5)
+        self.assertEqual(len(list_sources(session, "folder", include_masters=True)), 2 + len(MASTER_NAMES))
         self.assertEqual(len(list_parquet(session, "folder")), 2)
         session.items.append(item("duplicate", MASTER_NAMES[0], b"duplicate"))
         with self.assertRaisesRegex(DriveSourceError, "varios maestros"):
@@ -81,7 +81,7 @@ class DriveSourcesTests(unittest.TestCase):
         with self.assertRaisesRegex(DriveSourceError, "no una hoja nativa"):
             list_sources(session, "folder", include_masters=True)
         session.items.pop()
-        with self.assertRaisesRegex(DriveSourceError, "Mae_lada.xlsx"):
+        with self.assertRaisesRegex(DriveSourceError, MASTER_NAMES[-1]):
             list_sources(session, "folder", include_masters=True)
 
     def test_master_change_downloads_only_updated_excel(self):
@@ -90,7 +90,7 @@ class DriveSourcesTests(unittest.TestCase):
             self.add_masters(session)
             root = Path(folder)
             first = sync_files(session, root, "folder", include_masters=True)
-            self.assertEqual(len(first), 5)
+            self.assertEqual(len(first), 2 + len(MASTER_NAMES))
             session.downloads.clear()
             target = next(value for value in session.items if value["name"] == MASTER_NAMES[0])
             session.items[session.items.index(target)] = item(target["id"], target["name"], b"updated", "2")

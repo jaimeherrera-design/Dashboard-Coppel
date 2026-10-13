@@ -13,12 +13,18 @@ En Cloud la credencial se carga de `[gcp_service_account]` en Secrets de Streaml
 Ver [configuracion Cloud](../README.md#streamlit-community-cloud).
 Localmente se carga desde `COPPEL_DRIVE_CREDENTIALS` o, por defecto,
 `~/.config/coppel/drive-service-account.json`. Nunca guardarla en el proyecto.
-Los maestros `Mae_contacto.xlsx`, `Mae_did.xlsx` y `Mae_lada.xlsx` se descargan de
+Los maestros `Mae_contacto.xlsx`, `Mae_did.xlsx`, `Mae_lada.xlsx` y `Mae_Mora.xlsx` se descargan de
 la misma carpeta Drive, una unica version de cada archivo, en formato Excel XLSX.
 Si falta uno, hay duplicados o el archivo es una hoja nativa de Google se muestra
 un error; nunca se recurre a los maestros locales. La primera carga descarga y resume los datos;
 las siguientes reutilizan copias y resumenes intactos. Los filtros y las cuatro pestanas
 usan la misma lista de fuentes sincronizada.
+
+**Altura de mora:** `Mae_Mora.xlsx` (columnas `Campaña`, `ALTURA DE MORA`, `Posicion`) cruza el
+`Campaign Name` de las llamadas, sin distinguir mayusculas ni espacios. El selector, las tablas, los
+graficos, los insights, el detalle DID / Altura de mora / Mes y el PDF de recurrencia muestran la altura
+de mora en lugar de la campana, ordenada por `Posicion` de menor a mayor. Las campanas que no estan en el
+maestro se agrupan en **Sin altura de mora** (al final); las de test/prueba siguen excluidas. Los totales no cambian.
 
 ## Ejecucion
 
@@ -47,7 +53,7 @@ Para incluir solo un intervalo de `Call end`, agregar `--start 2026-06-01 --end 
 - Los archivos son acumulativos: no se eliminan duplicados entre Parquet. No dejes versiones que contengan las mismas llamadas si no quieres contarlas dos veces.
 - Actualiza `Mae_contacto.xlsx` en la carpeta Drive para cambiar la clasificacion (reemplazar la version, no dejar duplicados). Debe tener las columnas `Call Outcome name` y `Contacto / No Contacto`, con valores `Contacto` o `No Contacto`. El cruce ignora espacios al inicio/final y diferencias entre mayusculas y minusculas.
 - La cache detecta archivos agregados, eliminados o modificados, y cambios en el maestro de contactos, por nombre, fecha de modificacion y tamano.
-- El panel **Fuentes incluidas** muestra los Parquet y maestros de Drive usados. Si una fuente es invalida o el maestro falta, se muestra un error en lugar de calcular contactos con otra regla.
+- El panel lateral no muestra la carpeta ni la lista de fuentes: siempre se suman todos los Parquet de Drive. Si una fuente es invalida o el maestro falta, se muestra un error en lugar de calcular contactos con otra regla.
 
 ## Carga rapida e historico fijo
 
@@ -91,16 +97,20 @@ el error `removeChild` en Cloud; debe verificarse en el despliegue.
 - La primera carga prepara un resumen SQLite por Parquet descargado en su carpeta `.dashboard_cache`, dentro de `.drive_cache`. No modifica ni elimina las fuentes remotas ni los originales locales.
 - `3meses_v2.parquet` se mantiene incluido como historico. Mientras no cambie, las siguientes aperturas utilizan su resumen, incluso despues de reiniciar el dashboard o el equipo.
 - Cuando crece o cambia un Parquet, solo se reconstruye su resumen completo; al agregar uno se prepara solo el nuevo. Si no cambio ninguna fuente, se usan sus resumenes directamente.
-- Los resumenes conservan fecha, hora, tipo de llamada, campana, motivo de terminacion y resultado de llamada, con cantidades y sumas de tiempos. Se mantienen los filtros, graficos y la exportacion PPT.
+- Los resumenes conservan fecha, hora, tipo de llamada, campana, motivo de terminacion y resultado de llamada, con cantidades y sumas de tiempos. Se mantienen los filtros y graficos.
 - El maestro de contactos se aplica sobre los resumenes: cambiar Excel recalcula los contactos de todo el historico sin releer los Parquet.
 - La lista de fuentes remotas, sus versiones y firmas detectan Parquet agregados, modificados y retirados de Drive. Los CSV y Parquet de la raiz se ignoran.
 - La cache debe estar en una carpeta con permiso de escritura. Si se elimina `.dashboard_cache`, se regenera al abrir; una cache danada muestra un error y debe eliminarse para reconstruirla.
 
-Desde el panel lateral puedes seleccionar **Generar PPT ejecutiva** para crear una presentación `.pptx` con los filtros activos. La presentación incluye portada, KPI, evolución mensual y horaria, mapa de calor, campañas principales y una diapositiva final con los insights semaforizados. Los gráficos y los iconos de apoyo se generan con fondo transparente u oscuro, según corresponda, para mantener el estilo corporativo.
+El **Periodo** del panel lateral se elige con tres listas: **Año**, **Mes** y **Fecha** (cada una con la opcion Todos/Todas). Mes se habilita al elegir un año y Fecha al elegir un mes; la seleccion se convierte en el rango de fechas usado por todos los calculos, limitado a las fechas con datos.
+
+Desde el panel lateral, **Generar PDF recurrencia** crea el analisis de recurrencia e intentos por telefono del periodo seleccionado (ilocalizables, marcaciones hasta contacto y 6 insights semaforizados) y ofrece descargar el PDF y el CSV de ilocalizables cronicos. Usa solo el periodo; los demas filtros no aplican a este reporte. Tarda alrededor de 1 minuto con la base completa y el resultado queda en cache para el mismo periodo.
+
+**Exportar resultados sin maestro** genera un Excel (`Resultados_sin_maestro_AAAAMMDD.xlsx`) con los resultados de llamada **únicos** que no existen en `Mae_contacto.xlsx`, según los filtros activos. Los nombres se deduplican sin distinguir mayúsculas ni espacios. Trae las columnas del maestro (`Call Outcome name` y `Contacto / No Contacto` vacía, para asignarla), más llamadas y número de alturas de mora como referencia. Si no hay pendientes, muestra un aviso.
 
 ## Definiciones
 
-La vista principal tiene un banner ejecutivo azul con el logo local de Coppel (`assets/coppel-logo.png`) y el periodo activo, acentos amarillos, fondo claro y tarjetas con profundidad. Las tablas conservan sus encabezados azules, resumen mensual y de campanas, graficos en dos columnas y mapas de calor de contactabilidad por hora/dia. El encabezado se adapta a pantallas pequenas y no necesita descargar el logo de internet. Los KPI se muestran en cinco tarjetas: Total llamadas, Contactos, % de contactos, Idle time promedio y TMO. La cantidad y el porcentaje de contactos se presentan por separado, sin cambiar valores, unidades ni formulas. El analisis por campanas, los insights y la exportacion PPT siguen disponibles.
+La vista principal tiene un banner ejecutivo azul con el logo local de Coppel (`assets/coppel-logo.png`) y el periodo activo, acentos amarillos, fondo claro y tarjetas con profundidad. Las tablas conservan sus encabezados azules, resumen mensual y de campanas, graficos en dos columnas y mapas de calor de contactabilidad por hora/dia. El encabezado se adapta a pantallas pequenas y no necesita descargar el logo de internet. Los KPI se muestran en cinco tarjetas: Total llamadas, Contactos, % de contactos, Idle time promedio y TMO. La cantidad y el porcentaje de contactos se presentan por separado, sin cambiar valores, unidades ni formulas. El analisis por campanas sigue disponible; los insights semaforizados ahora estan en la pestana ANALISIS CONTACTABILIDAD.
 
 Los mapas visuales muestran porcentajes de contactos sobre llamadas de cada celda (no cantidades); una celda sin llamadas se muestra como `—`. El detalle por dia del mes y hora se obtiene de los resumenes persistentes, sin releer los CSV. Esto no modifica el calculo de los KPI ni la base usada por el PPT.
 
@@ -131,13 +141,23 @@ El grafico de campanas ocupa el ancho completo y compara dos paneles alineados p
 
 La tabla ajusta sus dos columnas al ancho disponible: resultado/mes/fecha ocupa el 65% y llamadas el 35%. Los nombres largos se distribuyen en varias lineas para no ocultar los valores de llamadas.
 
+El selector **Agrupar por** permite ver la tabla como Resultado / Mes / Fecha, Resultado / Estado o Estado / Resultado. El estado se obtiene de la lada del telefono con `Mae_lada.xlsx` (el maestro no incluye ciudad); los telefonos sin coincidencia quedan en **Sin cruce**.
+
+## Filtro Estado (panel lateral)
+
+El filtro **Estado** aplica a todo el dashboard. Sin estados seleccionados se usan los resumenes originales, por lo que las cifras no cambian. La primera seleccion prepara una cache horaria por estado (puede tardar varios minutos); despues responde en segundos.
+
 ## Pestana ANALISIS CONTACTABILIDAD
 
-Diagnostico descriptivo que comparte filtros y usa los resumenes principales existentes, solo al seleccionar la pestana. Explica el KPI como contactos / llamadas (promedio ponderado), muestra el volumen de las campanas por encima del 95%, compara tipos de llamada, prioriza las campanas por cantidad de no contactos y desglosa los resultados y la cobertura del maestro. Incluye tablas con totales y el estilo del dashboard, composicion porcentual por campana y evolucion mensual.
+Vista orientada a decisiones que comparte filtros y usa los resumenes principales existentes, solo al seleccionar la pestana. Se organiza en tres bloques:
+
+1. **Decisiones prioritarias:** seis tarjetas semaforizadas (🚨 Urgente, ⚠️ Vigilar, ✅ Mantener) ordenadas por urgencia, cada una con el hallazgo, **Que hacer** y **Que no hacer**: campana que mas contactos pierde, llamadas sin respuesta, fallas tecnicas y numeros invalidos, mejor y peor hora, TMO mas alto y campana modelo. Los insights que antes estaban en el dashboard principal se trasladaron aqui.
+2. **Donde se pierden los contactos:** grafico de campanas con mas no contactos y tablas desplegables por campana y por resultado.
+3. **Tendencia mensual:** grafico y tabla desplegable de comparabilidad por campana.
 
 Agrupa No Answer / Voicemail / Busy como falta de respuesta y Network Failure / Protocol Failure / Invalid Number / Incomplete Logging / Drop / Cancel como resultados tecnicos o de numeracion que requieren investigar. No modifica la clasificacion del Excel: un resultado clasificado Contacto conserva esa condicion; resultados desconocidos se identifican por separado. El grafico muestra las 15 campanas con mas no contactos; las tablas incluyen todas.
 
-Separa hallazgos medibles de hipotesis sobre base, horarios, marcador, DID o mezcla operativa. No infiere causas demostradas ni personas unicas/intentos repetidos a partir de resumenes que no conservan el telefono. Los totales corresponden a los filtros globales, no a una busqueda local en la tabla.
+Separa hallazgos medibles de recomendaciones. No infiere causas demostradas ni personas unicas/intentos repetidos a partir de resumenes que no conservan el telefono. Los totales corresponden a los filtros globales, no a una busqueda local en la tabla.
 
 Muestra una tabla jerarquica por **resultado de llamada / mes / fecha** y un grafico horizontal del porcentaje de cada resultado sobre el total de llamadas filtradas, ordenado por volumen descendente. Incluye todos los resultados, sin limitarse a los mas frecuentes. Las fechas corresponden a `Call end`.
 
@@ -147,8 +167,8 @@ Conserva encabezados azules y texto blanco, barras verdes de volumen en la tabla
 - **Contactos:** registros cuyo `Call Outcome name` figura como `Contacto` en `Mae_contacto.xlsx`. Los resultados no incluidos en el maestro no cuentan como contacto; no se usa `Talk Time` como alternativa.
 - **% de contactos:** contactos / total llamadas; se muestra como 0% si no hay llamadas.
 - **Iconos KPI:** auriculares para llamadas, persona con confirmacion para contactos, simbolo porcentual para contactabilidad, pausa para Idle y cronometro para TMO. Son SVG locales decorativos; no cambian los indicadores.
-- **Idle time:** promedio de `Wait Time`.
-- **TMO:** (`Talk Time` + `Wrap up time`) / total de registros.
+- **Idle time (tarjeta KPI):** promedio de `Wait Time` solo de llamadas de marcador (`dialer`).
+- **TMO (tarjeta KPI):** (`Talk Time` + `Wrap up time`) / llamadas de marcador. Los tipos `manual` y `preview` / vista previa no se miden en estas dos tarjetas: si el filtro de Call type solo deja esos tipos, muestran **N/A**. Las demas metricas, tablas y graficos no cambian.
 - **Mapa de calor:** contactos agregados por día de semana y hora de `Call end`.
 
 Se mantienen excluidas las campanas cuyo nombre contenga `test` o `prueba` y las llamadas sin fecha valida.

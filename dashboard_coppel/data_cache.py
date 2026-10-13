@@ -65,19 +65,30 @@ def iter_summary(
     version: str,
     namespace: str,
     batch_size: int = 25_000,
+    date_format: str = "%Y-%m-%d",
+    where: tuple[str, list[str]] | None = None,
 ) -> Iterator[pd.DataFrame]:
     if batch_size < 1:
         raise ValueError("El tamano del lote del resumen debe ser positivo.")
+    query, params = "SELECT * FROM summary", []
+    if where is not None:
+        column, values = where
+        if column not in keys:
+            raise ValueError(f"Columna de filtro no valida: {column}")
+        params = list(values)
+        if not params:
+            return
+        query += f' WHERE "{column}" IN ({", ".join("?" for _ in params)})'
     lock_key = signature[0] + namespace
     with _LOCKS_GUARD:
         lock = _SUMMARY_LOCKS.setdefault(lock_key, RLock())
     with lock:
         cache = _prepare_summary(
             signature, chunks, status, keys=keys, version=version,
-            namespace=namespace, date_format="%Y-%m-%d",
+            namespace=namespace, date_format=date_format,
         )
         with closing(sqlite3.connect(cache)) as connection:
-            for batch in pd.read_sql_query("SELECT * FROM summary", connection, chunksize=batch_size):
+            for batch in pd.read_sql_query(query, connection, params=params, chunksize=batch_size):
                 if source_signature(Path(signature[0])) != signature:
                     raise ValueError(f"La fuente cambio durante la carga: {Path(signature[0]).name}. Recarga el dashboard.")
                 yield batch

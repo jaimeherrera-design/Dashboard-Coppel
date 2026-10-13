@@ -4,11 +4,28 @@ from unittest.mock import patch
 from streamlit.testing.v1 import AppTest
 
 import app
-from contact_analysis import diagnostic_tables, failure_figure
+from contact_analysis import decision_insights, diagnostic_tables, failure_figure, render_contact_analysis
 from test_data_loading import DataLoadingTests
 
 
 class ContactAnalysisTests(DataLoadingTests):
+    def test_unmapped_outcomes_are_unique_and_assignable(self):
+        import pandas as pd
+        analysis = pd.DataFrame({
+            "Campaign Name": ["A", "B", "A", "A"],
+            "Call Type": ["Out"] * 4,
+            "Call Outcome name": ["New Code", "new code ", "Busy", "Other"],
+            "mapped": [False, False, True, False],
+            "calls": [5, 7, 100, 1], "contacts": [0, 0, 0, 0],
+        })
+        table = app.unmapped_outcomes(analysis)
+        self.assertEqual(list(table.columns), ["Call Outcome name", "Contacto / No Contacto", "Llamadas", "Alturas de mora"])
+        self.assertEqual(table["Call Outcome name"].tolist(), ["new code", "Other"])
+        self.assertEqual(table["Llamadas"].tolist(), [12, 1])
+        self.assertEqual(table["Alturas de mora"].tolist(), [2, 1])
+        self.assertEqual(pd.read_excel(__import__("io").BytesIO(app.unmapped_outcomes_excel(table))).shape, (2, 4))
+        self.assertTrue(app.unmapped_outcomes(analysis.loc[analysis["mapped"]]).empty)
+
     def test_diagnostics_preserve_classification_denominators_and_filters(self):
         self.write_csv("calls.csv", [
             self.row("2026-06-01", campaign="Manual"),
@@ -37,6 +54,27 @@ class ContactAnalysisTests(DataLoadingTests):
         self.write_mapping(["No Contacto", "Contacto"])
         changed = app.aggregate_contact_analysis(app.discover_csv_files(self.root), app.file_signature(self.mapping), self.filters)
         self.assertEqual(changed["contacts"].sum(), 0)
+
+    def test_six_traffic_light_decisions_sorted_by_urgency(self):
+        self.write_csv("calls.csv", [
+            self.row("2026-06-01 10:00:00"),
+            self.row("2026-06-02 11:00:00", outcome="Busy"),
+            self.row("2026-06-03 11:00:00", outcome="Busy", campaign="Manual"),
+        ])
+        result = self.result()
+        detail = app.aggregate_contact_analysis(app.discover_csv_files(self.root), app.file_signature(self.mapping), self.filters)
+        cards = decision_insights(detail, result)
+        self.assertEqual(len(cards), 6)
+        order = {"red": 0, "amber": 1, "green": 2}
+        self.assertEqual([card["status"] for card in cards], sorted((card["status"] for card in cards), key=order.get))
+        self.assertTrue(all(card["do"] and card["dont"] for card in cards))
+        self.assertIn("66.7%", next(card["finding"] for card in cards if card["title"] == "Llamadas que nadie contesta"))
+        with patch("contact_analysis.st.markdown") as markdown, patch("contact_analysis.report_chart"), \
+                patch("contact_analysis.render_interactive_table"):
+            render_contact_analysis(detail, result)
+        html = " ".join(call.args[0] for call in markdown.call_args_list)
+        self.assertEqual(html.count('class="decision-card'), 6)
+        self.assertNotIn("Qué explica el KPI", html)
 
     def test_analysis_tab_is_lazy_and_renders_with_zero_noncontacts(self):
         self.write_csv("calls.csv", [self.row("2026-06-01")])

@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 from interactive_table import render_interactive_table
+from mora import sort_by_mora
 
 
 BLUE = "#23458f"
@@ -122,7 +123,7 @@ def rate_line(table: pd.DataFrame, dimension: str, title: str, average: float, o
 
 
 def campaign_comparison(campaigns: pd.DataFrame, total: int) -> go.Figure:
-    plotted = presentation_metrics(campaigns).sort_values("calls", ascending=False).head(15)
+    plotted = sort_by_mora(presentation_metrics(campaigns)).head(15)
     positions = list(range(len(plotted)))
     labels = plotted["Campaign Name"].astype(str)
     short_labels = labels.map(lambda text: text if len(text) <= 35 else text[:32] + "...")
@@ -152,7 +153,7 @@ def campaign_comparison(campaigns: pd.DataFrame, total: int) -> go.Figure:
         tickmode="array", tickvals=positions, ticktext=short_labels,
         range=[len(plotted) - .5, -.5], showgrid=False,
     )
-    fig.update_layout(title="Peso operativo y efectividad por campaña", showlegend=False, bargap=.35)
+    fig.update_layout(title="Peso operativo y efectividad por altura de mora", showlegend=False, bargap=.35)
     return fig
 
 
@@ -161,14 +162,14 @@ def render_report(result: dict, hourly_days: pd.DataFrame) -> None:
         st.info("No hay llamadas para los filtros seleccionados.")
         return
     monthly = presentation_metrics(result["month"]).sort_values("month")
-    campaigns = presentation_metrics(result["campaign"]).sort_values("calls", ascending=False)
+    campaigns = sort_by_mora(presentation_metrics(result["campaign"]))
     left, right = st.columns(2)
     with left:
         with st.container(border=False, key="report-month-table"):
             report_table(monthly, "month", "Año · Mes", result, performance=True)
     with right:
         with st.container(border=False, key="report-campaign-table"):
-            report_table(campaigns, "Campaign Name", "Campaign Name", result, performance=True)
+            report_table(campaigns, "Campaign Name", "Altura de mora", result, performance=True)
     left, right = st.columns(2)
     with left:
         with st.container(border=False, key="report-month-volume"):

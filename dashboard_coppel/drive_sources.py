@@ -20,7 +20,7 @@ DRIVE_FOLDER_ID = "1VotCf0HuDIGbmkM88KYAQSZQRI0du-zB"
 API_URL = "https://www.googleapis.com/drive/v3"
 FILE_FIELDS = "id,name,mimeType,size,md5Checksum,modifiedTime,version,trashed"
 _SYNC_LOCK = RLock()
-MASTER_NAMES = ("Mae_contacto.xlsx", "Mae_did.xlsx", "Mae_lada.xlsx")
+MASTER_NAMES = ("Mae_contacto.xlsx", "Mae_did.xlsx", "Mae_lada.xlsx", "Mae_Mora.xlsx")
 
 
 @dataclass(frozen=True)
