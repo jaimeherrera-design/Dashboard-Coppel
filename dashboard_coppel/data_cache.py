@@ -154,6 +154,8 @@ def _prepare_summary(
                     wait_sum=("Wait Time", "sum"),
                 ).reset_index()
                 connection.executemany(statement, grouped[columns].itertuples(index=False, name=None))
+            if "state" in keys:
+                connection.execute('CREATE INDEX "summary_state_idx" ON summary ("state")')
             if source_signature(source) != signature:
                 raise ValueError(f"La fuente cambio durante la carga: {source.name}. Recarga el dashboard.")
             connection.execute("INSERT INTO metadata VALUES (?)", (identity,))

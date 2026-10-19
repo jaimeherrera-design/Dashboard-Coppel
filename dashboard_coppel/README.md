@@ -71,6 +71,12 @@ preparacion puede tardar varios minutos. Se conservan hasta dos resultados filtr
 en la cache de memoria del detalle. Los cambios de maestros reclasifican sin releer
 Parquet intactos. Otras tareas de conversion o division comparten disco y CPU.
 
+La pestana **RESULTADO LLAMADAS** presenta la jerarquia **Resultado / Mes / Estado / Fecha**.
+Su resumen diario por estado se prepara la primera vez que se abre la pestana y se guarda
+en la cache SQLite; esa preparacion inicial puede tardar. Los cambios posteriores del filtro
+Estado consultan el resumen guardado y usan un indice de estado. El estado se obtiene del
+prefijo telefonico con `Mae_lada.xlsx`; no hay dimension de ciudad disponible en ese maestro.
+
 ### Presentacion del detalle
 
 En **DETALLE DID / ESTADO**, un selector muestra solo una de las cinco tablas o graficos a la vez.

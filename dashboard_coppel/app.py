@@ -57,9 +57,9 @@ EXCLUDED_CAMPAIGN_PATTERN = r"test|prueba"
 NOT_DIALER_CALL_TYPES = {"manual", "preview", "vista previa"}
 FILTER_VERSION = "campaign-exclusion-v8-persistent-source-summaries"
 GROUP_METRICS = ["calls", "contacts", "talk_sum", "wrap_sum", "wait_sum"]
-STATE_VERSION = "state-hourly-v1"
+STATE_VERSION = "state-hourly-v2"
 OUTCOME_VERSION = "daily-outcomes-v1"
-OUTCOME_STATE_VERSION = "daily-outcome-states-v1"
+OUTCOME_STATE_VERSION = "daily-outcome-states-v2"
 PPT_NAVY = RGBColor(244, 247, 251)
 PPT_SURFACE = RGBColor(255, 255, 255)
 PPT_LINE = RGBColor(218, 228, 238)
@@ -404,11 +404,12 @@ def read_detail_summaries(files: tuple[FileSignature, ...], status=None):
 
 
 def read_outcome_summaries(files: tuple[FileSignature, ...], status=None, filters: dict | None = None):
-    states = (filters or {}).get("State")
-    if states:
-        _, ladas = load_detail_masters(*filters["detail_masters"])
-        for summary in read_outcome_state_summaries(files, ladas, status, states):
-            yield summary.drop(columns="state")
+    filters = filters or {}
+    detail_masters = filters.get("detail_masters")
+    if detail_masters:
+        _, ladas = load_detail_masters(*detail_masters)
+        for summary in read_outcome_state_summaries(files, ladas, status, filters.get("State")):
+            yield summary
         return
 
     def chunks(signature):
@@ -554,7 +555,10 @@ def aggregate_outcomes(files: tuple[FileSignature, ...], mapping_signature: File
                        filters: dict, _status=None) -> pd.DataFrame:
     parts = []
     outcomes = load_contact_outcomes(mapping_signature)
-    dimensions = ["Call Outcome name", "month", "date"]
+    dimensions = ["Call Outcome name", "month"]
+    if filters.get("detail_masters"):
+        dimensions.append("state")
+    dimensions.append("date")
     for chunk in read_outcome_summaries(files, _status, filters):
         chunk = apply_mora(chunk, filters)
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
@@ -1005,9 +1009,9 @@ def main() -> None:
         st.sidebar.caption(f"Filtro de estado no disponible: {exc}")
     if state_options:
         states = st.sidebar.multiselect("Estado", state_options, default=[])
+        filters["detail_masters"] = detail_masters
         if states:
             filters["State"] = states
-            filters["detail_masters"] = detail_masters
 
     try:
         result = aggregate(files, mapping_signature, FILTER_VERSION, filters)

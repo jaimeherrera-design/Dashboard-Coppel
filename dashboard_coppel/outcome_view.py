@@ -25,20 +25,23 @@ def outcome_figure(table: pd.DataFrame) -> go.Figure:
     return fig
 
 
-GROUPING = "Resultado / Mes / Fecha"
-DIMENSIONS = ["Call Outcome name", "month", "date"]
-
-
 def render_outcomes(table: pd.DataFrame) -> None:
     if table.empty:
         st.info("No hay llamadas para los filtros seleccionados.")
         return
+    dimensions = ["Call Outcome name", "month"]
+    grouping = ["Resultado", "Mes"]
+    if "state" in table.columns:
+        dimensions.append("state")
+        grouping.append("Estado")
+    dimensions.append("date")
+    grouping.append("Fecha")
     height = max(600, table["Call Outcome name"].nunique() * 25 + 150)
     left, right = st.columns([.4, .6])
     with left:
-        display = hierarchy_rows(table, DIMENSIONS)
+        display = hierarchy_rows(table, dimensions)
         render_interactive_table(
-            display, [("label", GROUPING), ("calls", "Total llamadas")],
+            display, [("label", " / ".join(grouping)), ("calls", "Total llamadas")],
             "Resultado llamadas", height=height, hierarchy=True, compact=True,
             totals={"label": "Total", "calls": int(table["calls"].sum())},
         )

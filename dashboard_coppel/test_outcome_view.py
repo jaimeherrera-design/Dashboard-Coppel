@@ -56,11 +56,15 @@ class OutcomeViewTests(DataLoadingTests):
             by_state[state] = app.aggregate(files, signature, app.FILTER_VERSION, filters)
             outcome = app.aggregate_outcomes(files, signature, filters)
             self.assertEqual(outcome["calls"].sum(), by_state[state]["total"])
+            self.assertEqual(outcome["state"].unique().tolist(), [state])
         self.assertEqual(by_state["CDMX"]["total"], 2)
         self.assertEqual(by_state["CDMX"]["contacts"], 2)
         self.assertEqual(by_state["Sin cruce"]["total"], 1)
         self.assertEqual(sum(result["total"] for result in by_state.values()), base["total"])
-        outcome = app.aggregate_outcomes(files, signature, self.filters)
+        state_filters = {**self.filters, "detail_masters": masters}
+        outcome = app.aggregate_outcomes(files, signature, state_filters)
+        self.assertEqual(set(outcome["state"]), {"CDMX", "Sin cruce"})
+        self.assertEqual(outcome["calls"].sum(), base["total"])
         with patch("outcome_view.st.radio", side_effect=AssertionError("No hay agrupación por estado")), \
                 patch("outcome_view.render_interactive_table") as render, patch("outcome_view.report_chart"):
             render_outcomes(outcome)
@@ -70,6 +74,7 @@ class OutcomeViewTests(DataLoadingTests):
             ["recordatorio", "Busy"],
         )
         self.assertEqual(render.call_args.kwargs["totals"]["calls"], 3)
+        self.assertEqual(render.call_args.args[1][0][1], "Resultado / Mes / Estado / Fecha")
 
     def test_outcome_tab_loads_lazily(self):
         self.write_csv("calls.csv", [self.row("2026-06-01")])
