@@ -48,7 +48,10 @@ def request_metadata(session, resource: str, params: dict) -> dict:
         return response.json()
 
 
-def list_sources(session, folder_id: str, *, include_masters: bool = False) -> list[dict]:
+def list_sources(
+    session, folder_id: str, *, include_masters: bool = False, include_parquet: bool = True,
+    master_names: tuple[str, ...] = MASTER_NAMES,
+) -> list[dict]:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", folder_id):
         raise DriveSourceError("Identificador de carpeta Drive invalido.")
     folder = request_metadata(session, f"files/{folder_id}",
@@ -67,8 +70,9 @@ def list_sources(session, folder_id: str, *, include_masters: bool = False) -> l
         if page.get("incompleteSearch"):
             raise DriveSourceError("Drive devolvio una lista incompleta; no se calcularan totales parciales.")
         for item in page.get("files", []):
-            selected_master = include_masters and item["name"].casefold() in {name.casefold() for name in MASTER_NAMES}
-            if not item["name"].casefold().endswith(".parquet") and not selected_master:
+            selected_master = include_masters and item["name"].casefold() in {name.casefold() for name in master_names}
+            selected_parquet = include_parquet and item["name"].casefold().endswith(".parquet")
+            if not selected_parquet and not selected_master:
                 continue
             if item["mimeType"].startswith("application/vnd.google-apps."):
                 if selected_master:
@@ -89,10 +93,10 @@ def list_sources(session, folder_id: str, *, include_masters: bool = False) -> l
         if not token:
             break
         params["pageToken"] = token
-    if not any(item["name"].casefold().endswith(".parquet") for item in files):
+    if include_parquet and not any(item["name"].casefold().endswith(".parquet") for item in files):
         raise DriveSourceError("No hay archivos Parquet accesibles en la carpeta de Drive.")
     if include_masters:
-        for name in MASTER_NAMES:
+        for name in master_names:
             matches = [item for item in files if item["name"].casefold() == name.casefold()]
             if not matches:
                 raise DriveSourceError(f"Falta el maestro {name} en la carpeta de Drive.")
@@ -110,10 +114,16 @@ def remote_identity(item: dict) -> dict:
 
 
 def sync_files(session, cache_root: Path, folder_id: str, status=None,
-               *, include_masters: bool = False) -> tuple[FileSignature, ...]:
+               *, include_masters: bool = False, include_parquet: bool = True,
+               master_names: tuple[str, ...] = MASTER_NAMES) -> tuple[FileSignature, ...]:
     with _SYNC_LOCK:
         def listing():
-            return list_sources(session, folder_id, include_masters=True) if include_masters else list_parquet(session, folder_id)
+            if include_masters or not include_parquet:
+                return list_sources(
+                    session, folder_id, include_masters=include_masters, include_parquet=include_parquet,
+                    master_names=master_names,
+                )
+            return list_parquet(session, folder_id)
 
         files = listing()
         signatures = []
@@ -195,22 +205,46 @@ def load_credentials(info: Mapping[str, str] | None = None):
     
 
 def discover_drive_files(root: Path, status=None, *, service_account_info: Mapping[str, str] | None = None,
-                         include_masters: bool = False) -> tuple[FileSignature, ...]:
+                         include_masters: bool = False, include_parquet: bool = True,
+                         master_names: tuple[str, ...] = MASTER_NAMES) -> tuple[FileSignature, ...]:
     credentials = load_credentials(service_account_info)
     try:
         with AuthorizedSession(credentials) as session:
-            return sync_files(session, root / ".drive_cache", DRIVE_FOLDER_ID, status, include_masters=include_masters)
+            return sync_files(
+                session, root / ".drive_cache", DRIVE_FOLDER_ID, status,
+                include_masters=include_masters, include_parquet=include_parquet,
+                master_names=master_names,
+            )
     except (GoogleAuthError, requests.RequestException) as exc:
         raise DriveSourceError("No se pudo autenticar o conectar con Drive. Verifique la clave, permisos y conexion.") from exc
 
 
-def discover_drive_sources(root: Path, status=None, *, service_account_info: Mapping[str, str] | None = None) -> DriveSources:
-    signatures = discover_drive_files(root, status, service_account_info=service_account_info, include_masters=True)
+def discover_drive_sources(
+    root: Path, status=None, *, service_account_info: Mapping[str, str] | None = None,
+    master_names: tuple[str, ...] = MASTER_NAMES,
+) -> DriveSources:
+    signatures = discover_drive_files(
+        root, status, service_account_info=service_account_info,
+        include_masters=True, master_names=master_names,
+    )
     masters = {
         name: next(signature for signature in signatures if Path(signature[0]).name.casefold() == name.casefold())
-        for name in MASTER_NAMES
+        for name in master_names
     }
     return DriveSources(
         parquet=tuple(signature for signature in signatures if Path(signature[0]).suffix.casefold() == ".parquet"),
         masters=masters,
     )
+
+
+def discover_drive_masters(
+    root: Path, status=None, *, service_account_info: Mapping[str, str] | None = None,
+) -> dict[str, FileSignature]:
+    signatures = discover_drive_files(
+        root, status, service_account_info=service_account_info,
+        include_masters=True, include_parquet=False,
+    )
+    return {
+        name: next(signature for signature in signatures if Path(signature[0]).name.casefold() == name.casefold())
+        for name in MASTER_NAMES
+    }

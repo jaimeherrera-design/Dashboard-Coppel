@@ -10,9 +10,9 @@ from threading import Lock, RLock
 import pandas as pd
 
 
-SUMMARY_VERSION = "hourly-outcome-v1"
+SUMMARY_VERSION = "hourly-outcome-v3-crossed-contacts"
 SUMMARY_KEYS = ["Call end", "Call Type", "Campaign Name", "Term Reason", "Call Outcome name"]
-SUMMARY_METRICS = ["calls", "talk_sum", "wrap_sum", "wait_sum"]
+SUMMARY_METRICS = ["calls", "contacts", "talk_sum", "wrap_sum", "wait_sum"]
 FileSignature = tuple[str, int, int]
 _SUMMARY_LOCKS: dict[str, RLock] = {}
 _LOCKS_GUARD = Lock()
@@ -146,9 +146,14 @@ def _prepare_summary(
             connection.execute("CREATE TABLE metadata (identity TEXT NOT NULL)")
             for chunk in chunks():
                 chunk = chunk.copy()
+                if "_calls" not in chunk:
+                    chunk["_calls"] = 1
+                if "_contacts" not in chunk:
+                    chunk["_contacts"] = 0
                 chunk["Call end"] = chunk["Call end"].dt.strftime(date_format).fillna("")
                 grouped = chunk.groupby(keys, dropna=False).agg(
-                    calls=("Talk Time", "size"),
+                    calls=("_calls", "sum"),
+                    contacts=("_contacts", "sum"),
                     talk_sum=("Talk Time", "sum"),
                     wrap_sum=("Wrap up time", "sum"),
                     wait_sum=("Wait Time", "sum"),

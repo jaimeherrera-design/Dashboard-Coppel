@@ -1,30 +1,40 @@
 # Dashboard Coppel
 
-Dashboard ejecutivo de Contact Center alimentado exclusivamente por todos los `.parquet`
-directamente en la carpeta privada de Google Drive `1VotCf0HuDIGbmkM88KYAQSZQRI0du-zB`,
-inicialmente `3meses_v2.parquet` y `3meses_v3.parquet`. Se suman automaticamente al abrir,
-recargar o cambiar filtros. La lista se consulta con paginacion; archivos nuevos o modificados
-se descargan a `.drive_cache/` y se verifican por tamano y MD5. Los retirados dejan de sumarse.
-Las subcarpetas, CSV y archivos de la raiz local se ignoran. Fallos de permisos, red, integridad
-o lista incompleta muestran un error sin usar otras fuentes ni totales parciales.
+Dashboard ejecutivo de Contact Center conectado exclusivamente a los archivos `.parquet`
+directamente en la carpeta privada de Google Drive `1VotCf0HuDIGbmkM88KYAQSZQRI0du-zB`.
+Suma todos los Parquet de esa carpeta al abrir, recargar o cambiar filtros. La lista se consulta
+con paginacion; archivos nuevos o modificados se descargan a `.drive_cache/` y se verifican
+por tamano y MD5. Los Parquet locales, CSV y subcarpetas de Drive se ignoran. No hay selector
+de fuente local ni modo de prueba.
+
+Drive debe contener los Parquet cruzados con columnas `Hora`, `conteo_registros`,
+`Contacto / No Contacto`, `ALTURA DE MORA`, `Posicion`, `Estado`, `HOMOLOGACION`,
+`DDI sin homologar`, `NIR 3 digitos sin homologar` y `Campaign Name sin homologar`.
+Los Parquet antiguos sin esos cruces deben retirarse antes de cargar los nuevos; si queda
+alguno, el dashboard muestra un error en vez de mezclar formatos. Los archivos son acumulativos:
+no suba simultaneamente versiones que contengan las mismas llamadas.
+
+El campo `conteo_registros` se usa como cantidad de llamadas; `Talk Time`, `Wait Time` y
+`Wrap up time` contienen las sumas por grupo. No se usa `Total Calls` como contador.
+`Contacto / No Contacto`, altura de mora y estado se leen del Parquet.
+
+En el panel lateral, el rango se elige directamente con una barra de fechas. Los selectores de
+**Mes** y **Año** están disponibles de forma independiente: se puede filtrar un mes sin elegir
+primero el año, o escoger un rango/fecha puntual sin pasar por esos selectores. Si se combinan,
+los criterios se aplican simultaneamente.
 
 Ver [configuracion privada local](../README.md#Acceso-privado-local-a-Drive).
 En Cloud la credencial se carga de `[gcp_service_account]` en Secrets de Streamlit.
 Ver [configuracion Cloud](../README.md#streamlit-community-cloud).
 Localmente se carga desde `COPPEL_DRIVE_CREDENTIALS` o, por defecto,
 `~/.config/coppel/drive-service-account.json`. Nunca guardarla en el proyecto.
-Los maestros `Mae_contacto.xlsx`, `Mae_did.xlsx`, `Mae_lada.xlsx` y `Mae_Mora.xlsx` se descargan de
-la misma carpeta Drive, una unica version de cada archivo, en formato Excel XLSX.
-Si falta uno, hay duplicados o el archivo es una hoja nativa de Google se muestra
-un error; nunca se recurre a los maestros locales. La primera carga descarga y resume los datos;
-las siguientes reutilizan copias y resumenes intactos. Los filtros y las cuatro pestanas
-usan la misma lista de fuentes sincronizada.
+El unico maestro requerido es `Mae_did.xlsx`, XLSX, con una sola version en Drive.
+Se usa para el nombre del proveedor; `HOMOLOGACION` ya viene en el Parquet. No se
+requieren `Mae_contacto.xlsx`, `Mae_lada.xlsx` ni `Mae_Mora.xlsx`. La primera carga descarga
+y resume los datos; las siguientes reutilizan copias y resumenes intactos.
 
-**Altura de mora:** `Mae_Mora.xlsx` (columnas `Campaña`, `ALTURA DE MORA`, `Posicion`) cruza el
-`Campaign Name` de las llamadas, sin distinguir mayusculas ni espacios. El selector, las tablas, los
-graficos, los insights, el detalle DID / Altura de mora / Mes y el PDF de recurrencia muestran la altura
-de mora en lugar de la campana, ordenada por `Posicion` de menor a mayor. Las campanas que no estan en el
-maestro se agrupan en **Sin altura de mora** (al final); las de test/prueba siguen excluidas. Los totales no cambian.
+**Altura de mora:** se toma de `ALTURA DE MORA` en el Parquet y se ordena por `Posicion`.
+La campaña original se conserva para excluir nombres de test/prueba.
 
 ## Ejecucion
 
@@ -43,7 +53,7 @@ Para redistribuir las fuentes por fechas, `split_by_dates.py --root <raiz> --dow
 
 Los CSV pueden dividirse con `split_sources.py --root <raiz> --downloads <Descargas>`: cada parte incluye el encabezado y ocupa como maximo 24.000.000 bytes, sin cortar registros (incluidos campos con saltos de linea). La herramienta verifica la reconstruccion byte por byte mediante SHA-256 y luego mueve los originales a una carpeta `Coppel_backup_<fecha>` en Descargas, con un manifiesto de tamanos y registros. Ejecutar con el dashboard detenido para evitar sumar originales y partes durante la sustitucion. Rechaza dividir de nuevo una raiz que ya contiene partes.
 
-Las partes CSV no alimentan ninguna pestana. Usar `split_by_dates.py --root <raiz> --downloads <Descargas> --repository-only` para generar partes sin mover ni modificar los originales. Para agregar llamadas al dashboard, subir un nuevo Parquet a la carpeta de Drive o actualizar uno existente, sin duplicar registros entre fuentes.
+Las partes CSV no alimentan ninguna pestana. Usar `split_by_dates.py --root <raiz> --downloads <Descargas> --repository-only` para generar partes sin mover ni modificar los originales. Para agregar llamadas al dashboard, subir un nuevo Parquet cruzado a la carpeta de Drive o actualizar uno existente, sin duplicar registros entre fuentes ni conservar la version sin cruces.
 
 Con `--repository-only --output-dir <destino>` se pueden guardar los CSV fechados en otra carpeta, conservando los originales. El destino no debe contener CSV ni manifest.json previos. Los archivos temporales existentes no se sobrescriben.
 
@@ -51,9 +61,9 @@ Para incluir solo un intervalo de `Call end`, agregar `--start 2026-06-01 --end 
 
 - Al abrir o recargar el dashboard, se sincronizan automaticamente todos los Parquet de la carpeta Drive, sin botones de actualizacion. Las cuatro pestanas, filtros, indicadores, graficos y exportaciones incluyen su suma.
 - Los archivos son acumulativos: no se eliminan duplicados entre Parquet. No dejes versiones que contengan las mismas llamadas si no quieres contarlas dos veces.
-- Actualiza `Mae_contacto.xlsx` en la carpeta Drive para cambiar la clasificacion (reemplazar la version, no dejar duplicados). Debe tener las columnas `Call Outcome name` y `Contacto / No Contacto`, con valores `Contacto` o `No Contacto`. El cruce ignora espacios al inicio/final y diferencias entre mayusculas y minusculas.
-- La cache detecta archivos agregados, eliminados o modificados, y cambios en el maestro de contactos, por nombre, fecha de modificacion y tamano.
-- El panel lateral no muestra la carpeta ni la lista de fuentes: siempre se suman todos los Parquet de Drive. Si una fuente es invalida o el maestro falta, se muestra un error en lugar de calcular contactos con otra regla.
+- La clasificacion de contacto, altura de mora, posicion y estado se lee directamente de cada Parquet cruzado.
+- La cache detecta archivos Parquet agregados, eliminados o modificados y cambios en `Mae_did.xlsx`, por nombre, fecha de modificacion y tamano.
+- Se suman todos los Parquet de Drive. Si un archivo no tiene los cruces requeridos o falta el maestro de proveedor, se muestra un error.
 
 ## Carga rapida e historico fijo
 
@@ -73,9 +83,7 @@ Parquet intactos. Otras tareas de conversion o division comparten disco y CPU.
 
 La pestana **RESULTADO LLAMADAS** presenta la jerarquia **Resultado / Mes / Estado / Fecha**.
 Su resumen diario por estado se prepara la primera vez que se abre la pestana y se guarda
-en la cache SQLite; esa preparacion inicial puede tardar. Los cambios posteriores del filtro
-Estado consultan el resumen guardado y usan un indice de estado. El estado se obtiene del
-prefijo telefonico con `Mae_lada.xlsx`; no hay dimension de ciudad disponible en ese maestro.
+en la cache SQLite; esa preparacion inicial puede tardar. El estado se toma del Parquet cruzado.
 
 ### Presentacion del detalle
 
@@ -101,18 +109,16 @@ Estas optimizaciones reducen la memoria y los datos enviados por tabla, pero no 
 el error `removeChild` en Cloud; debe verificarse en el despliegue.
 
 - La primera carga prepara un resumen SQLite por Parquet descargado en su carpeta `.dashboard_cache`, dentro de `.drive_cache`. No modifica ni elimina las fuentes remotas ni los originales locales.
-- `3meses_v2.parquet` se mantiene incluido como historico. Mientras no cambie, las siguientes aperturas utilizan su resumen, incluso despues de reiniciar el dashboard o el equipo.
 - Cuando crece o cambia un Parquet, solo se reconstruye su resumen completo; al agregar uno se prepara solo el nuevo. Si no cambio ninguna fuente, se usan sus resumenes directamente.
-- Los resumenes conservan fecha, hora, tipo de llamada, campana, motivo de terminacion y resultado de llamada, con cantidades y sumas de tiempos. Se mantienen los filtros y graficos.
-- El maestro de contactos se aplica sobre los resumenes: cambiar Excel recalcula los contactos de todo el historico sin releer los Parquet.
+- Los resumenes conservan las dimensiones y metricas de los Parquet cruzados, incluyendo contactos, altura de mora, estado, cantidades y sumas de tiempos.
+- `Mae_did.xlsx` completa el nombre del proveedor; no reclasifica contactos ni estado.
 - La lista de fuentes remotas, sus versiones y firmas detectan Parquet agregados, modificados y retirados de Drive. Los CSV y Parquet de la raiz se ignoran.
 - La cache debe estar en una carpeta con permiso de escritura. Si se elimina `.dashboard_cache`, se regenera al abrir; una cache danada muestra un error y debe eliminarse para reconstruirla.
 
-El **Periodo** del panel lateral se elige con tres listas: **Año**, **Mes** y **Fecha** (cada una con la opcion Todos/Todas). Mes se habilita al elegir un año y Fecha al elegir un mes; la seleccion se convierte en el rango de fechas usado por todos los calculos, limitado a las fechas con datos.
+La barra de fechas permite seleccionar el rango de manera directa. Los filtros **Mes** y
+**Año** funcionan independientemente y se pueden combinar con ese rango.
 
-La exportacion PDF de recurrencia y su generador independiente fueron retirados. El dashboard ya no genera ni descarga ese reporte.
-
-**Exportar resultados sin maestro** genera un Excel (`Resultados_sin_maestro_AAAAMMDD.xlsx`) con los resultados de llamada **únicos** que no existen en `Mae_contacto.xlsx`, según los filtros activos. Los nombres se deduplican sin distinguir mayúsculas ni espacios. Trae las columnas del maestro (`Call Outcome name` y `Contacto / No Contacto` vacía, para asignarla), más llamadas y número de alturas de mora como referencia. Si no hay pendientes, muestra un aviso.
+La exportacion PDF de recurrencia y su generador independiente fueron retirados. El dashboard ya no genera ni descarga ese reporte. Tampoco muestra exportaciones de resultados sin maestro: esos cruces ya vienen incluidos en los Parquet.
 
 ## Definiciones
 
@@ -138,18 +144,18 @@ El grafico de campanas ocupa el ancho completo y compara dos paneles alineados p
 - El nivel principal de las tres tablas de detalle se muestra en negrilla. Cada tabla tiene una fila Total fija azul/blanca: suma las llamadas y contactos una sola vez y calcula contactabilidad, TMO e Idle ponderados por llamadas. El total corresponde a los filtros del dashboard, independientemente de la expansion, ordenamiento o busqueda local.
 - Muestra llamadas y contactabilidad por DID, y un diagrama TMO/contactabilidad por estado con lineas de referencia del promedio ponderado de las llamadas filtradas.
 - El diagrama por estado muestra los nombres y metricas al pasar el cursor sobre cada punto, sin etiquetas permanentes superpuestas.
-- `Mae_did.xlsx`, en la carpeta Drive, debe contener `DDI`, `NOMBRE` y `HOMOLOGACION`. Se cruza el DDI del Parquet con el maestro, ignorando ceros iniciales (por ejemplo, `0056` y `56`); la homologacion identifica el DID mostrado y NOMBRE identifica el proveedor.
-- `Mae_lada.xlsx` debe contener `NIR` y `ESTADO`; se ignoran espacios en los encabezados. Se busca la lada de tres digitos del campo `Phone`, y luego la de dos si no existe la primera. Se admiten telefonos nacionales de diez digitos y prefijos internacionales `52` o `521`, con espacios, parentesis y guiones. No se adivina el estado de telefonos incompletos.
-- Los registros sin coincidencia permanecen en **Sin cruce**, sin un aviso separado encima de las tablas. Maestros faltantes, bloqueados, incompletos o con claves contradictorias muestran un error en esta pestana sin ocultar el dashboard principal.
-- La primera carga prepara resumenes adicionales por Parquet, conservando DDI y solo los primeros tres digitos validos del telefono, no el numero completo. No reemplaza los resumenes principales ni modifica las fuentes. Despues utiliza la cache persistente y solo prepara fuentes nuevas o modificadas. Los cambios en cualquiera de los maestros reclasifican estos resumenes sin releer los Parquet.
+- `Mae_did.xlsx`, en la carpeta Drive, debe contener `DDI`, `NOMBRE` y `HOMOLOGACION`. Se cruza el DDI del Parquet con el maestro, ignorando ceros iniciales (por ejemplo, `0056` y `56`), para completar el nombre del proveedor.
+- DID, homologacion y estado ya vienen cruzados en el Parquet. No se consulta `Mae_lada.xlsx`; los registros cuya clasificacion ya venga como **Sin cruce** permanecen asi.
+- Si el maestro de proveedor falta, esta bloqueado, incompleto o tiene claves contradictorias, esta pestana muestra un error sin ocultar el dashboard principal.
+- La primera carga prepara resumenes adicionales por Parquet con las dimensiones ya cruzadas. No reemplaza los resumenes principales ni modifica las fuentes. Despues utiliza la cache persistente y solo prepara fuentes nuevas o modificadas.
 
 ## Pestana RESULTADO LLAMADAS
 
 La tabla ajusta sus dos columnas al ancho disponible: resultado/mes/fecha ocupa el 65% y llamadas el 35%. Los nombres largos se distribuyen en varias lineas para no ocultar los valores de llamadas.
 
-La tabla muestra los resultados agrupados por Resultado / Mes / Fecha. Se retiraron las visualizaciones Resultado / Estado y Estado / Resultado; el filtro global **Estado** sigue aplicando a esta pestaña y al resto del dashboard.
+La tabla muestra los resultados agrupados por Resultado / Mes / Estado / Fecha. El filtro global **Estado** sigue aplicando a esta pestaña y al resto del dashboard.
 
-El contenido de la pestana solo se prepara al abrirla. En esa primera carga se construyen resumenes persistentes por dia y resultado de llamada; si hay un filtro global de estado activo, tambien se incluye el estado en el resumen. Se lee el Parquet en lotes y se muestra el avance. Las siguientes visitas reutilizan la cache SQLite en lugar de recorrer los resumenes horarios. Se conservan los filtros, clasificacion de contacto, agrupacion diaria y metricas existentes.
+El contenido de la pestana solo se prepara al abrirla. En esa primera carga se construyen resumenes persistentes por dia, resultado y estado. Se lee el Parquet en lotes y se muestra el avance. Las siguientes visitas reutilizan la cache SQLite en lugar de recorrer los resumenes horarios.
 
 ## Filtro Estado (panel lateral)
 
@@ -163,7 +169,7 @@ Vista orientada a decisiones que comparte filtros y usa los resumenes principale
 2. **Donde se pierden los contactos:** grafico de campanas con mas no contactos y tablas desplegables por campana y por resultado.
 3. **Tendencia mensual:** grafico y tabla desplegable de comparabilidad por campana.
 
-Agrupa No Answer / Voicemail / Busy como falta de respuesta y Network Failure / Protocol Failure / Invalid Number / Incomplete Logging / Drop / Cancel como resultados tecnicos o de numeracion que requieren investigar. No modifica la clasificacion del Excel: un resultado clasificado Contacto conserva esa condicion; resultados desconocidos se identifican por separado. El grafico muestra las 15 campanas con mas no contactos; las tablas incluyen todas.
+Agrupa No Answer / Voicemail / Busy como falta de respuesta y Network Failure / Protocol Failure / Invalid Number / Incomplete Logging / Drop / Cancel como resultados tecnicos o de numeracion que requieren investigar. Respeta la clasificacion `Contacto / No Contacto` del Parquet; el grafico muestra las 15 campanas con mas no contactos y las tablas incluyen todas.
 
 Separa hallazgos medibles de recomendaciones. No infiere causas demostradas ni personas unicas/intentos repetidos a partir de resumenes que no conservan el telefono. Los totales corresponden a los filtros globales, no a una busqueda local en la tabla.
 
@@ -172,7 +178,7 @@ Muestra una tabla jerarquica por **resultado de llamada / mes / fecha** y un gra
 Conserva encabezados azules y texto blanco, barras verdes de volumen en la tabla, primer nivel expandido y en negrilla, total fijo azul/blanco, ordenamiento, busqueda y barras de desplazamiento. El grafico usa azul claro y etiquetas de dos decimales. Comparte filtros y KPI; solo carga al seleccionar la pestana y utiliza los resumenes principales existentes, sin crear otra cache ni releer Parquet que no cambiaron.
 
 - **Total llamadas:** cantidad de registros de la base después de aplicar filtros.
-- **Contactos:** registros cuyo `Call Outcome name` figura como `Contacto` en `Mae_contacto.xlsx`. Los resultados no incluidos en el maestro no cuentan como contacto; no se usa `Talk Time` como alternativa.
+- **Contactos:** registros clasificados como `Contacto` en el campo `Contacto / No Contacto` del Parquet cruzado.
 - **% de contactos:** contactos / total llamadas; se muestra como 0% si no hay llamadas.
 - **Iconos KPI:** auriculares para llamadas, persona con confirmacion para contactos, simbolo porcentual para contactabilidad, pausa para Idle y cronometro para TMO. Son SVG locales decorativos; no cambian los indicadores.
 - **Idle time (tarjeta KPI):** promedio de `Wait Time` solo de llamadas de marcador (`dialer`).

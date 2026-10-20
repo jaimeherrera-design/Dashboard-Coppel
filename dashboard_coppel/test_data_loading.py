@@ -22,8 +22,12 @@ class DataLoadingTests(unittest.TestCase):
         self.mapping = self.root / "Mae_contacto.xlsx"
         self.did_mapping = self.root / "Mae_did.xlsx"
         self.lada_mapping = self.root / "Mae_lada.xlsx"
+        self.mora_mapping = self.root / "Mae_Mora.xlsx"
         pd.DataFrame({"DDI": ["56"], "NOMBRE": ["IPCOM"], "HOMOLOGACION": ["56-IPCOM"]}).to_excel(self.did_mapping, index=False)
         pd.DataFrame({" ESTADO": ["CDMX"], " NIR": ["55"]}).to_excel(self.lada_mapping, index=False)
+        pd.DataFrame({"Campaña": ["Cobranza"], "ALTURA DE MORA": ["MORA 1"], "Posicion": [1]}).to_excel(
+            self.mora_mapping, index=False,
+        )
         self.write_mapping(["Contacto", "No Contacto"])
         self.filters = {
             "start": date(2026, 6, 1),
@@ -44,6 +48,14 @@ class DataLoadingTests(unittest.TestCase):
         }).to_excel(self.mapping, index=False)
         info = self.mapping.stat()
         os.utime(self.mapping, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+
+    def dashboard_sources(self):
+        return app.discover_csv_files(self.root), {
+            "Mae_contacto.xlsx": app.file_signature(self.mapping),
+            "Mae_did.xlsx": app.file_signature(self.did_mapping),
+            "Mae_lada.xlsx": app.file_signature(self.lada_mapping),
+            "Mae_Mora.xlsx": app.file_signature(self.mora_mapping),
+        }
 
     def row(self, ended, outcome="recordatorio", talk=0, campaign="Cobranza"):
         return {

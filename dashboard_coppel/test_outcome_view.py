@@ -78,7 +78,8 @@ class OutcomeViewTests(DataLoadingTests):
 
     def test_outcome_tab_loads_lazily(self):
         self.write_csv("calls.csv", [self.row("2026-06-01")])
-        with patch.object(app, "DATA_ROOT", self.root), patch.object(app, "CONTACT_MAPPING_FILE", self.mapping):
+        with patch.object(app, "DATA_ROOT", self.root), \
+                patch.object(app, "discover_dashboard_sources", return_value=self.dashboard_sources()):
             ui = AppTest.from_string("import app\napp.main()", default_timeout=30).run()
             self.assertEqual(len(ui.tabs[2].get("iframe")), 0)
             ui.session_state["dashboard-pages"] = "RESULTADO LLAMADAS"

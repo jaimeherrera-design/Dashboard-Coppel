@@ -12,15 +12,52 @@ from interactive_table import table_html
 
 
 class ReportViewTests(test_data_loading.DataLoadingTests):
-    def test_period_selectors_map_to_date_range(self):
+    def test_date_range_month_and_year_filters_are_independent(self):
         from datetime import date
-        lo, hi = date(2026, 6, 15), date(2026, 10, 8)
-        self.assertEqual(app.period_bounds(lo, hi), (lo, hi))
-        self.assertEqual(app.period_bounds(lo, hi, 2026), (lo, hi))
-        self.assertEqual(app.period_bounds(lo, hi, 2026, 6), (lo, date(2026, 6, 30)))
-        self.assertEqual(app.period_bounds(lo, hi, 2026, 9), (date(2026, 9, 1), date(2026, 9, 30)))
-        self.assertEqual(app.period_bounds(lo, hi, 2026, 10), (date(2026, 10, 1), hi))
-        self.assertEqual(app.period_bounds(lo, hi, 2026, 7, date(2026, 7, 4)), (date(2026, 7, 4), date(2026, 7, 4)))
+
+        dates = pd.to_datetime(["2025-06-01", "2026-06-15", "2026-07-04"])
+        chunk = pd.DataFrame({
+            "Call end": dates,
+            "Campaign Name": ["Campaña"] * 3,
+            "Call Type": ["Manual"] * 3,
+            "Term Reason": ["Normal"] * 3,
+        })
+        filters = {
+            "start": date(2025, 6, 1),
+            "end": date(2026, 7, 4),
+            "Call Type": [],
+            "Campaign Name": [],
+            "Term Reason": [],
+        }
+
+        self.assertEqual(
+            chunk.loc[app.selected_mask(chunk, {**filters, "month": 6}), "Call end"].tolist(),
+            [dates[0], dates[1]],
+        )
+        self.assertEqual(
+            chunk.loc[app.selected_mask(chunk, {**filters, "year": 2026}), "Call end"].tolist(),
+            [dates[1], dates[2]],
+        )
+        exact_date = {**filters, "start": date(2026, 6, 15), "end": date(2026, 6, 15)}
+        self.assertEqual(
+            chunk.loc[app.selected_mask(chunk, exact_date), "Call end"].tolist(),
+            [dates[1]],
+        )
+
+    def test_period_widgets_are_available_without_a_selection_sequence(self):
+        from datetime import date
+
+        ui = AppTest.from_string(
+            "from datetime import date\n"
+            "import app\n"
+            "app.select_period(date(2025, 6, 1), date(2026, 7, 4))"
+        ).run()
+        self.assertFalse(ui.exception)
+        self.assertEqual(len(ui.slider), 1)
+        self.assertEqual(
+            {widget.label: widget.disabled for widget in ui.selectbox},
+            {"Año": False, "Mes": False},
+        )
 
     def test_visual_rates_and_hourly_detail_preserve_totals(self):
         self.write_csv("calls.csv", [

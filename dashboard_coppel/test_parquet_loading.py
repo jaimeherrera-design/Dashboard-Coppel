@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pandas as pd
 
 import app
+from drive_sources import DriveSources
 from test_data_loading import DataLoadingTests
 
 
@@ -110,3 +111,195 @@ class ParquetLoadingTests(DataLoadingTests):
             self.assertEqual(self.parquet_result()["total"], 3)
             self.assertEqual(app.aggregate_detail(self.files(), *masters)["did"]["calls"].sum(), 3)
         self.assertEqual(loaded, ["second.parquet", "second.parquet"])
+
+    def test_crossed_drive_parquet_reuses_classifications_and_requires_only_did_master(self):
+        rows = [
+            {
+                "Hora": "2026-06-01 10:00:00", "Talk Time": 6, "Wait Time": 4,
+                "Wrap up time": 2, "Call Type": "dialer", "ALTURA DE MORA": "MORA 1",
+                "Posicion": 1, "Term Reason": "DIALER", "Call Outcome name sin homologar": "recordatorio",
+                "Contacto / No Contacto": "Contacto", "Campaign Name sin homologar": "Cobranza",
+                "DDI sin homologar": "0056", "NIR 3 digitos sin homologar": "551",
+                "HOMOLOGACION": "56-IPCOM", "Estado": "CDMX", "conteo_registros": 2,
+            },
+            {
+                "Hora": "2026-06-02 10:00:00", "Talk Time": 9, "Wait Time": 6,
+                "Wrap up time": 3, "Call Type": "manual", "ALTURA DE MORA": "MORA 2",
+                "Posicion": 2, "Term Reason": "MANUAL", "Call Outcome name sin homologar": "Busy",
+                "Contacto / No Contacto": "No Contacto", "Campaign Name sin homologar": "Cobranza",
+                "DDI sin homologar": "0056", "NIR 3 digitos sin homologar": "551",
+                "HOMOLOGACION": "56-IPCOM", "Estado": "CDMX", "conteo_registros": 3,
+            },
+        ]
+        path = self.root / "crossed.parquet"
+        pd.DataFrame(rows).to_parquet(path, index=False)
+        files = (app.file_signature(path),)
+
+        result = app.aggregate(files, None, app.FILTER_VERSION, self.filters)
+        self.assertEqual(result["total"], 5)
+        self.assertEqual(result["contacts"], 2)
+        self.assertEqual(result["campaign"]["Campaign Name"].tolist(), ["MORA 1", "MORA 2"])
+
+        outcomes = app.aggregate_outcomes(files, None, self.filters)
+        self.assertEqual(outcomes["contacts"].sum(), 2)
+        analysis = app.aggregate_contact_analysis(files, None, self.filters)
+        self.assertEqual(analysis["calls"].sum(), 5)
+        self.assertTrue(analysis["mapped"].all())
+
+        detail = app.aggregate_detail(
+            files, None, app.file_signature(self.did_mapping), None, self.filters,
+        )
+        self.assertEqual(detail["did"]["calls"].sum(), 5)
+        self.assertEqual(detail["did_month"]["provider"].tolist(), ["IPCOM"])
+        self.assertEqual(detail["state"]["calls"].sum(), 5)
+
+    def test_local_consolidated_schema_uses_weighted_calls_and_preserves_filters(self):
+        rows = [
+            {
+                "Hora": "2026-06-01 10:00:00", "Talk Time": "6", "Wait Time": "4",
+                "Wrap up time": "2", "Call Type": "dialer",
+                "Campaign Name sin homologar": "Cobranza", "Term Reason": "DIALER",
+                "Call Outcome name sin homologar": "recordatorio",
+                "DDI sin homologar": "0056", "NIR 3 digitos sin homologar": "55",
+                "Estado": "CDMX", "conteo_registros": "2",
+            },
+            {
+                "Hora": "2026-09-01 11:00:00", "Talk Time": "9", "Wait Time": "6",
+                "Wrap up time": "3", "Call Type": "manual",
+                "Campaign Name sin homologar": "Cobranza", "Term Reason": "MANUAL",
+                "Call Outcome name sin homologar": "Busy",
+                "DDI sin homologar": "0056", "NIR 3 digitos sin homologar": "55",
+                "Estado": "CDMX", "conteo_registros": "3",
+            },
+            {
+                "Hora": "2026-06-01 12:00:00", "Talk Time": "100", "Wait Time": "100",
+                "Wrap up time": "100", "Call Type": "dialer",
+                "Campaign Name sin homologar": "CP_PRUEBA", "Term Reason": "DIALER",
+                "Call Outcome name sin homologar": "recordatorio",
+                "DDI sin homologar": "0056", "NIR 3 digitos sin homologar": "55",
+                "Estado": "CDMX", "conteo_registros": "7",
+            },
+        ]
+        path = self.root / "consolidado.parquet"
+        pd.DataFrame(rows).to_parquet(path, index=False)
+        files = (app.file_signature(path),)
+        mapping = app.file_signature(self.mapping)
+        result = app.aggregate(files, mapping, app.FILTER_VERSION, self.filters)
+        self.assertEqual(result["total"], 5)
+        self.assertEqual(result["contacts"], 2)
+        self.assertEqual(result["talk_sum"], 15)
+        self.assertEqual(result["wait_sum"], 10)
+        self.assertEqual(result["wrap_sum"], 5)
+        self.assertEqual(result["day"]["calls"].sum(), 5)
+        self.assertEqual(
+            dict(zip(result["day"]["day"], result["day"]["calls"])),
+            {"2026-06-01": 2, "2026-09-01": 3},
+        )
+
+        expanded_rows = []
+        for ended, count, outcome, call_type, term in [
+            ("2026-06-01 10:00:00", 2, "recordatorio", "dialer", "DIALER"),
+            ("2026-09-01 11:00:00", 3, "Busy", "manual", "MANUAL"),
+        ]:
+            for _ in range(count):
+                row = self.row(ended, outcome=outcome, talk=3, campaign="Cobranza")
+                row.update({"Wait Time": 2, "Wrap up time": 1, "Call Type": call_type, "Term Reason": term})
+                expanded_rows.append(row)
+        for _ in range(7):
+            row = self.row("2026-06-01 12:00:00", campaign="CP_PRUEBA", talk=100)
+            row.update({"Wait Time": 100, "Wrap up time": 100})
+            expanded_rows.append(row)
+        self.write_csv("expanded.csv", expanded_rows)
+        csv_files = app.discover_csv_files(self.root)
+        expected = app.aggregate(csv_files, mapping, app.FILTER_VERSION, self.filters)
+        for key, value in expected.items():
+            if isinstance(value, pd.DataFrame):
+                pd.testing.assert_frame_equal(result[key], value)
+            else:
+                self.assertEqual(result[key], value, key)
+        outcome_detail_masters = (
+            app.file_signature(self.did_mapping), app.file_signature(self.lada_mapping),
+        )
+        outcome_filters = {**self.filters, "detail_masters": outcome_detail_masters}
+        pd.testing.assert_frame_equal(
+            app.aggregate_outcomes(files, mapping, outcome_filters),
+            app.aggregate_outcomes(csv_files, mapping, outcome_filters),
+        )
+        pd.testing.assert_frame_equal(
+            app.aggregate_contact_analysis(files, mapping, self.filters),
+            app.aggregate_contact_analysis(csv_files, mapping, self.filters),
+        )
+        detail_masters = (
+            mapping, app.file_signature(self.did_mapping),
+            app.file_signature(self.lada_mapping), self.filters,
+        )
+        for key, value in app.aggregate_detail(files, *detail_masters).items():
+            expected_value = app.aggregate_detail(csv_files, *detail_masters)[key]
+            if isinstance(value, pd.DataFrame):
+                pd.testing.assert_frame_equal(value, expected_value)
+            else:
+                self.assertEqual(value, expected_value, key)
+
+        date_filters = {**self.filters, "start": pd.Timestamp("2026-09-01").date(),
+                        "end": pd.Timestamp("2026-09-01").date()}
+        self.assertEqual(app.aggregate(files, mapping, app.FILTER_VERSION, date_filters)["total"], 3)
+        type_filters = {**self.filters, "Call Type": ["manual"]}
+        self.assertEqual(app.aggregate(files, mapping, app.FILTER_VERSION, type_filters)["total"], 3)
+        campaign_filters = {**self.filters, "Campaign Name": ["No existe"]}
+        self.assertEqual(app.aggregate(files, mapping, app.FILTER_VERSION, campaign_filters)["total"], 0)
+        metadata = app.scan_metadata(files)
+        self.assertEqual(metadata["options"]["Call Type"], ["dialer", "manual"])
+        self.assertEqual(metadata["options"]["State"], ["CDMX"])
+
+        state_filters = {
+            **self.filters, "State": ["CDMX"],
+            "detail_masters": (app.file_signature(self.did_mapping), app.file_signature(self.lada_mapping)),
+        }
+        state_result = app.aggregate(files, mapping, app.FILTER_VERSION, state_filters)
+        self.assertEqual(state_result["total"], 5)
+
+        detail = app.aggregate_detail(
+            files, mapping, app.file_signature(self.did_mapping),
+            app.file_signature(self.lada_mapping), self.filters,
+        )
+        self.assertEqual(detail["did"]["calls"].sum(), 5)
+        self.assertEqual(detail["state"]["calls"].sum(), 5)
+        self.assertEqual(detail["state"]["state"].tolist(), ["CDMX"])
+        self.assertEqual(detail["unmapped_did"], 0)
+        self.assertEqual(detail["unmapped_state"], 0)
+
+        outcome = app.aggregate_outcomes(files, mapping, self.filters)
+        self.assertEqual(outcome["calls"].sum(), 5)
+        analysis = app.aggregate_contact_analysis(files, mapping, self.filters)
+        self.assertEqual(analysis["calls"].sum(), 5)
+        self.assertEqual(analysis["contacts"].sum(), 2)
+
+    def test_local_consolidated_requires_valid_record_counts(self):
+        row = {
+            "Hora": "2026-06-01 10:00:00", "Talk Time": "6", "Wait Time": "4",
+            "Wrap up time": "2", "Call Type": "dialer",
+            "Campaign Name sin homologar": "Cobranza", "Term Reason": "DIALER",
+            "Call Outcome name sin homologar": "recordatorio", "conteo_registros": "1.5",
+        }
+        path = self.root / "consolidado.parquet"
+        pd.DataFrame([row]).to_parquet(path, index=False)
+        with self.assertRaisesRegex(ValueError, "conteo_registros"):
+            list(app.read_source_chunks((app.file_signature(path),)))
+
+    def test_dashboard_sources_always_use_drive_and_ignore_local_parquets(self):
+        self.write_parquet("local-only.parquet", [self.row("2026-06-01")])
+        drive_sources = DriveSources(
+            parquet=(("drive.parquet", 1, 10),),
+            masters={"Mae_did.xlsx": ("did.xlsx", 2, 20)},
+        )
+        with patch.object(app, "discover_drive_sources", return_value=drive_sources) as discover, \
+                patch.object(app, "is_crossed_source", return_value=True):
+            files, masters = app.discover_dashboard_sources(
+                self.root, service_account_info={"type": "service_account"},
+            )
+        self.assertEqual(files, drive_sources.parquet)
+        self.assertEqual(masters, drive_sources.masters)
+        discover.assert_called_once_with(
+            self.root, None, service_account_info={"type": "service_account"},
+            master_names=app.DRIVE_MASTER_NAMES,
+        )

@@ -5,7 +5,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from drive_sources import DriveSourceError, discover_drive_files, discover_drive_sources, list_parquet, list_sources, load_credentials, sync_files, MASTER_NAMES
+from drive_sources import (
+    DriveSourceError, discover_drive_files, discover_drive_masters, discover_drive_sources,
+    list_parquet, list_sources, load_credentials, sync_files, MASTER_NAMES,
+)
 
 
 def item(identifier, name, content, version="1"):
@@ -84,6 +87,15 @@ class DriveSourcesTests(unittest.TestCase):
         with self.assertRaisesRegex(DriveSourceError, MASTER_NAMES[-1]):
             list_sources(session, "folder", include_masters=True)
 
+    def test_dashboard_can_require_only_the_provider_master(self):
+        session = Session()
+        self.add_masters(session)
+        files = list_sources(
+            session, "folder", include_masters=True, master_names=("Mae_did.xlsx",),
+        )
+        names = {file["name"] for file in files}
+        self.assertEqual(names, {"same.parquet", "Mae_did.xlsx"})
+
     def test_master_change_downloads_only_updated_excel(self):
         with tempfile.TemporaryDirectory() as folder:
             session = Session()
@@ -106,6 +118,22 @@ class DriveSourcesTests(unittest.TestCase):
             self.assertEqual(len(sources.parquet), 2)
             self.assertEqual(set(sources.masters), set(MASTER_NAMES))
             self.assertTrue(discover.call_args.kwargs["include_masters"])
+
+    def test_discover_masters_does_not_sync_parquet_sources(self):
+        with tempfile.TemporaryDirectory() as folder:
+            session = Session()
+            self.add_masters(session)
+            masters = sync_files(
+                session, Path(folder), "folder", include_masters=True, include_parquet=False,
+            )
+            self.assertEqual(len(masters), len(MASTER_NAMES))
+            self.assertFalse(any(Path(signature[0]).suffix.casefold() == ".parquet" for signature in masters))
+            with patch("drive_sources.discover_drive_files", return_value=masters) as discover:
+                result = discover_drive_masters(
+                    Path(folder), service_account_info={"type": "service_account"},
+                )
+            self.assertEqual(set(result), set(MASTER_NAMES))
+            self.assertFalse(discover.call_args.kwargs["include_parquet"])
 
     def test_cloud_credentials_take_priority_and_invalid_secrets_do_not_fallback(self):
         info = {"type": "service_account", "private_key": "test-only-not-a-key"}

@@ -13,7 +13,7 @@ from mora import position, sort_by_mora
 from report_view import BLUE, LIGHT_BLUE, GREEN, presentation_metrics, report_chart
 
 
-DETAIL_VERSION = "daily-did-phone-prefix-v2"
+DETAIL_VERSION = "daily-did-phone-prefix-v4-crossed-contacts"
 METRICS = ["calls", "contacts", "talk_sum", "wrap_sum", "wait_sum"]
 UNMAPPED = "Sin cruce"
 
@@ -39,38 +39,52 @@ def phone_prefix(value: str) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def load_detail_masters(did_signature: FileSignature, lada_signature: FileSignature) -> tuple[pd.DataFrame, dict]:
+def load_detail_masters(
+    did_signature: FileSignature, lada_signature: FileSignature | None,
+) -> tuple[pd.DataFrame, dict]:
     did = pd.read_excel(did_signature[0], dtype=str).dropna(how="all")
-    lada = pd.read_excel(lada_signature[0], dtype=str).dropna(how="all")
     did.columns = did.columns.str.strip()
-    lada.columns = lada.columns.str.strip()
-    for table, required, name in [
-        (did, ["DDI", "NOMBRE", "HOMOLOGACION"], "Mae_did.xlsx"),
-        (lada, ["NIR", "ESTADO"], "Mae_lada.xlsx"),
-    ]:
-        missing = set(required).difference(table.columns)
-        if missing:
-            raise ValueError(f"{name}: faltan columnas {', '.join(sorted(missing))}.")
-        if table.empty or table[required].isna().any().any():
-            raise ValueError(f"{name}: maestro vacío o con campos obligatorios sin dato.")
-        for column in required:
-            table[column] = table[column].str.strip()
-            if table[column].eq("").any():
-                raise ValueError(f"{name}: {column} contiene valores vacíos.")
+    required_did = ["DDI", "NOMBRE", "HOMOLOGACION"]
+    missing = set(required_did).difference(did.columns)
+    if missing:
+        raise ValueError(f"Mae_did.xlsx: faltan columnas {', '.join(sorted(missing))}.")
+    if did.empty or did[required_did].isna().any().any():
+        raise ValueError("Mae_did.xlsx: maestro vacío o con campos obligatorios sin dato.")
+    for column in required_did:
+        did[column] = did[column].str.strip()
+        if did[column].eq("").any():
+            raise ValueError(f"Mae_did.xlsx: {column} contiene valores vacíos.")
     did["DDI"] = did["DDI"].map(numeric_code)
-    lada["NIR"] = lada["NIR"].map(numeric_code)
-    if did["DDI"].eq("").any() or not lada["NIR"].str.fullmatch(r"\d{2,3}").all():
-        raise ValueError("Los DDI deben ser numéricos y las ladas deben tener dos o tres dígitos.")
-    for table, key, values, name in [
-        (did, "DDI", ["NOMBRE", "HOMOLOGACION"], "Mae_did.xlsx"),
-        (lada, "NIR", ["ESTADO"], "Mae_lada.xlsx"),
-    ]:
-        if table.groupby(key)[values].nunique().gt(1).any().any():
-            raise ValueError(f"{name}: hay cruces contradictorios para el mismo {key}.")
+    if did["DDI"].eq("").any():
+        raise ValueError("Los DDI deben ser numéricos.")
+    if did.groupby("DDI")[["NOMBRE", "HOMOLOGACION"]].nunique().gt(1).any().any():
+        raise ValueError("Mae_did.xlsx: hay cruces contradictorios para el mismo DDI.")
+    ladas = {}
+    if lada_signature is not None:
+        lada = pd.read_excel(lada_signature[0], dtype=str).dropna(how="all")
+        lada.columns = lada.columns.str.strip()
+        required = ["NIR", "ESTADO"]
+        missing = set(required).difference(lada.columns)
+        if missing:
+            raise ValueError(f"Mae_lada.xlsx: faltan columnas {', '.join(sorted(missing))}.")
+        if lada.empty or lada[required].isna().any().any():
+            raise ValueError("Mae_lada.xlsx: maestro vacío o con campos obligatorios sin dato.")
+        for column in required:
+            lada[column] = lada[column].str.strip()
+            if lada[column].eq("").any():
+                raise ValueError(f"Mae_lada.xlsx: {column} contiene valores vacíos.")
+        lada["NIR"] = lada["NIR"].map(numeric_code)
+        if not lada["NIR"].str.fullmatch(r"\d{2,3}").all():
+            raise ValueError("Las ladas deben tener dos o tres dígitos.")
+        if lada.groupby("NIR")["ESTADO"].nunique().gt(1).any():
+            raise ValueError("Mae_lada.xlsx: hay cruces contradictorios para el mismo NIR.")
+        ladas = lada.drop_duplicates("NIR").set_index("NIR")["ESTADO"].to_dict()
     for signature in [did_signature, lada_signature]:
+        if signature is None:
+            continue
         if source_signature(Path(signature[0])) != signature:
             raise ValueError("Un maestro de detalle cambió durante la lectura. Recarga el dashboard.")
-    return did.drop_duplicates("DDI").set_index("DDI"), lada.drop_duplicates("NIR").set_index("NIR")["ESTADO"].to_dict()
+    return did.drop_duplicates("DDI").set_index("DDI"), ladas
 
 
 def phone_state(prefix: pd.Series, ladas: dict) -> pd.Series:
@@ -79,9 +93,12 @@ def phone_state(prefix: pd.Series, ladas: dict) -> pd.Series:
 
 def classify_detail(chunk: pd.DataFrame, did: pd.DataFrame, ladas: dict) -> pd.DataFrame:
     chunk = chunk.copy()
-    chunk["did"] = chunk["DDI"].map(did["HOMOLOGACION"]).fillna(UNMAPPED)
-    chunk["provider"] = chunk["DDI"].map(did["NOMBRE"]).fillna(UNMAPPED)
-    chunk["state"] = phone_state(chunk["phone_prefix"], ladas)
+    if "did" not in chunk:
+        chunk["did"] = chunk["DDI"].map(did["HOMOLOGACION"]).fillna(UNMAPPED)
+    if "provider" not in chunk:
+        chunk["provider"] = chunk["DDI"].map(did["NOMBRE"]).fillna(UNMAPPED)
+    if "state" not in chunk:
+        chunk["state"] = phone_state(chunk["phone_prefix"], ladas)
     chunk["month"] = chunk["Call end"].dt.to_period("M").astype(str)
     return chunk
 

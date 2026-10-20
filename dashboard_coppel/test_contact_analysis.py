@@ -26,6 +26,40 @@ class ContactAnalysisTests(DataLoadingTests):
         self.assertEqual(pd.read_excel(__import__("io").BytesIO(app.unmapped_outcomes_excel(table))).shape, (2, 4))
         self.assertTrue(app.unmapped_outcomes(analysis.loc[analysis["mapped"]]).empty)
 
+    def test_unmapped_mora_campaigns_export_original_names_with_active_filters(self):
+        import pandas as pd
+        from mora import UNMAPPED_MORA
+
+        master = self.root / "Mae_Mora.xlsx"
+        pd.DataFrame({
+            "Campaña": ["Cobranza"],
+            "ALTURA DE MORA": ["MORA 1"],
+            "Posicion": [1],
+        }).to_excel(master, index=False)
+        self.write_csv("calls.csv", [
+            self.row("2026-06-01", campaign="Nueva"),
+            self.row("2026-06-02", campaign="nueva"),
+            self.row("2026-06-03", campaign="Cobranza"),
+            self.row("2026-06-04", campaign="Prueba nueva"),
+            self.row("2026-10-01", campaign="Fuera de periodo"),
+        ])
+        files = app.discover_csv_files(self.root)
+        mora_signature = app.file_signature(master)
+        filters = {**self.filters, "mora_master": mora_signature}
+        app.unmapped_mora_campaigns.clear()
+        self.addCleanup(app.unmapped_mora_campaigns.clear)
+
+        table = app.unmapped_mora_campaigns(files, mora_signature, filters)
+        self.assertEqual(table.to_dict("records"), [{
+            "Campaña": "Nueva",
+            "Altura de mora": UNMAPPED_MORA,
+            "Llamadas": 2,
+        }])
+        exported = pd.read_excel(__import__("io").BytesIO(app.unmapped_mora_campaigns_excel(table)))
+        self.assertEqual(exported.shape, (1, 3))
+        filters["Campaign Name"] = ["MORA 1"]
+        self.assertTrue(app.unmapped_mora_campaigns(files, mora_signature, filters).empty)
+
     def test_diagnostics_preserve_classification_denominators_and_filters(self):
         self.write_csv("calls.csv", [
             self.row("2026-06-01", campaign="Manual"),
@@ -78,7 +112,8 @@ class ContactAnalysisTests(DataLoadingTests):
 
     def test_analysis_tab_is_lazy_and_renders_with_zero_noncontacts(self):
         self.write_csv("calls.csv", [self.row("2026-06-01")])
-        with patch.object(app, "DATA_ROOT", self.root), patch.object(app, "CONTACT_MAPPING_FILE", self.mapping):
+        with patch.object(app, "DATA_ROOT", self.root), \
+                patch.object(app, "discover_dashboard_sources", return_value=self.dashboard_sources()):
             ui = AppTest.from_string("import app\napp.main()", default_timeout=30).run()
             self.assertEqual(len(ui.tabs[3].get("iframe")), 0)
             ui.session_state["dashboard-pages"] = "ANÁLISIS CONTACTABILIDAD"
