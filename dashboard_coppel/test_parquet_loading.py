@@ -117,7 +117,7 @@ class ParquetLoadingTests(DataLoadingTests):
             {
                 "Hora": "2026-06-01 10:00:00", "Talk Time": 6, "Wait Time": 4,
                 "Wrap up time": 2, "Call Type": "dialer", "ALTURA DE MORA": "MORA 1",
-                "Posicion": 1, "Term Reason": "DIALER", "Call Outcome name sin homologar": "recordatorio",
+                "Posicion": "1", "Term Reason": "DIALER", "Call Outcome name sin homologar": "recordatorio",
                 "Contacto / No Contacto": "Contacto", "Campaign Name sin homologar": "Cobranza",
                 "DDI sin homologar": "0056", "NIR 3 digitos sin homologar": "551",
                 "HOMOLOGACION": "56-IPCOM", "Estado": "CDMX", "conteo_registros": 2,
@@ -125,10 +125,18 @@ class ParquetLoadingTests(DataLoadingTests):
             {
                 "Hora": "2026-06-02 10:00:00", "Talk Time": 9, "Wait Time": 6,
                 "Wrap up time": 3, "Call Type": "manual", "ALTURA DE MORA": "MORA 2",
-                "Posicion": 2, "Term Reason": "MANUAL", "Call Outcome name sin homologar": "Busy",
+                "Posicion": "2", "Term Reason": "MANUAL", "Call Outcome name sin homologar": "Busy",
                 "Contacto / No Contacto": "No Contacto", "Campaign Name sin homologar": "Cobranza",
                 "DDI sin homologar": "0056", "NIR 3 digitos sin homologar": "551",
                 "HOMOLOGACION": "56-IPCOM", "Estado": "CDMX", "conteo_registros": 3,
+            },
+            {
+                "Hora": "2026-06-03 10:00:00", "Talk Time": 2, "Wait Time": 1,
+                "Wrap up time": 1, "Call Type": "manual", "ALTURA DE MORA": "Pendiente asignacion",
+                "Posicion": "Pendiente asignacion", "Term Reason": "MANUAL", "Call Outcome name sin homologar": "Other",
+                "Contacto / No Contacto": "Pendiente asignacion", "Campaign Name sin homologar": "Cobranza",
+                "DDI sin homologar": "0056", "NIR 3 digitos sin homologar": "551",
+                "HOMOLOGACION": "56-IPCOM", "Estado": "CDMX", "conteo_registros": 1,
             },
         ]
         path = self.root / "crossed.parquet"
@@ -136,22 +144,28 @@ class ParquetLoadingTests(DataLoadingTests):
         files = (app.file_signature(path),)
 
         result = app.aggregate(files, None, app.FILTER_VERSION, self.filters)
-        self.assertEqual(result["total"], 5)
+        self.assertEqual(result["total"], 6)
         self.assertEqual(result["contacts"], 2)
-        self.assertEqual(result["campaign"]["Campaign Name"].tolist(), ["MORA 1", "MORA 2"])
+        self.assertEqual(
+            result["campaign"]["Campaign Name"].tolist(),
+            ["MORA 1", "MORA 2", "Pendiente asignacion"],
+        )
 
         outcomes = app.aggregate_outcomes(files, None, self.filters)
+        self.assertEqual(outcomes["calls"].sum(), 6)
         self.assertEqual(outcomes["contacts"].sum(), 2)
         analysis = app.aggregate_contact_analysis(files, None, self.filters)
-        self.assertEqual(analysis["calls"].sum(), 5)
-        self.assertTrue(analysis["mapped"].all())
+        self.assertEqual(analysis["calls"].sum(), 6)
+        pending = analysis.loc[analysis["Call Outcome name"].eq("Other")].iloc[0]
+        self.assertFalse(pending["mapped"])
+        self.assertEqual(pending["contacts"], 0)
 
         detail = app.aggregate_detail(
             files, None, app.file_signature(self.did_mapping), None, self.filters,
         )
-        self.assertEqual(detail["did"]["calls"].sum(), 5)
+        self.assertEqual(detail["did"]["calls"].sum(), 6)
         self.assertEqual(detail["did_month"]["provider"].tolist(), ["IPCOM"])
-        self.assertEqual(detail["state"]["calls"].sum(), 5)
+        self.assertEqual(detail["state"]["calls"].sum(), 6)
 
     def test_local_consolidated_schema_uses_weighted_calls_and_preserves_filters(self):
         rows = [

@@ -17,6 +17,10 @@ no suba simultaneamente versiones que contengan las mismas llamadas.
 El campo `conteo_registros` se usa como cantidad de llamadas; `Talk Time`, `Wait Time` y
 `Wrap up time` contienen las sumas por grupo. No se usa `Total Calls` como contador.
 `Contacto / No Contacto`, altura de mora y estado se leen del Parquet.
+Los registros `Pendiente asignacion` se conservan en el total de llamadas, no se cuentan como
+contactos y aparecen como pendientes/sin clasificacion; una altura o posicion de mora pendiente
+se conserva y queda al final del orden, no bloquea la carga. El unico maestro requerido sigue
+siendo `Mae_did.xlsx`; no se requiere `Mae_contacto.xlsx`.
 
 En el panel lateral, el rango se elige directamente con una barra de fechas. Los selectores de
 **Mes** y **Año** están disponibles de forma independiente: se puede filtrar un mes sin elegir

@@ -336,18 +336,22 @@ def read_file_chunks(path: Path, columns: list[str], *, detail: bool):
                     if crossed:
                         contact_flag = chunk.pop(CONSOLIDATED_CONTACT_COLUMN).fillna("").astype(str).str.strip()
                         normalized_flag = contact_flag.str.casefold()
-                        if not normalized_flag.isin(["contacto", "no contacto"]).all():
+                        supported_flags = ["contacto", "no contacto", "pendiente asignacion"]
+                        if not normalized_flag.isin(supported_flags).all():
                             raise ValueError(
-                                f"{CONSOLIDATED_CONTACT_COLUMN} debe clasificar cada llamada como "
-                                "Contacto o No Contacto."
+                                f"{CONSOLIDATED_CONTACT_COLUMN} contiene una clasificacion no reconocida. "
+                                "Los valores admitidos son Contacto, No Contacto o Pendiente asignacion."
                             )
                         chunk["contact_flag"] = contact_flag
                         chunk["_contacts"] = counts * normalized_flag.eq("contacto").astype(int)
                         chunk["source_campaign"] = chunk.pop(CONSOLIDATED_SOURCE_CAMPAIGN_COLUMN)
                         positions = pd.to_numeric(chunk.pop(CONSOLIDATED_POSITION_COLUMN), errors="coerce")
-                        if positions.isna().any():
+                        pending_mora = chunk["Campaign Name"].fillna("").astype(str).str.strip().str.casefold().eq(
+                            "pendiente asignacion"
+                        )
+                        if (positions.isna() & ~pending_mora).any():
                             raise ValueError(f"{CONSOLIDATED_POSITION_COLUMN} debe ser numérica.")
-                        chunk["mora_position"] = positions
+                        chunk["mora_position"] = positions.fillna(float("inf"))
                     if detail:
                         for target, source in detail_columns.items():
                             chunk[target] = chunk.pop(source)
