@@ -59,6 +59,40 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
             {"Año": False, "Mes": False},
         )
 
+    def test_date_range_bounds_follow_selected_year_and_month(self):
+        from datetime import date
+
+        ui = AppTest.from_string(
+            "from datetime import date\n"
+            "import app\n"
+            "app.select_period(date(2025, 6, 15), date(2026, 8, 20))"
+        ).run()
+        self.assertFalse(ui.exception)
+        slider = ui.slider(key="period-range")
+        self.assertEqual(pd.to_datetime(slider.proto.min, unit="us").date(), date(2025, 6, 15))
+        self.assertEqual(pd.to_datetime(slider.proto.max, unit="us").date(), date(2026, 8, 20))
+
+        ui.selectbox(key="period-year").set_value(2026).run()
+        self.assertFalse(ui.exception)
+        slider = ui.slider(key="period-range")
+        self.assertEqual(pd.to_datetime(slider.proto.min, unit="us").date(), date(2026, 1, 1))
+        self.assertEqual(pd.to_datetime(slider.proto.max, unit="us").date(), date(2026, 8, 20))
+        self.assertEqual(slider.value, (date(2026, 1, 1), date(2026, 8, 20)))
+
+        ui.selectbox(key="period-month").set_value(6).run()
+        self.assertFalse(ui.exception)
+        slider = ui.slider(key="period-range")
+        self.assertEqual(pd.to_datetime(slider.proto.min, unit="us").date(), date(2026, 6, 1))
+        self.assertEqual(pd.to_datetime(slider.proto.max, unit="us").date(), date(2026, 6, 30))
+        self.assertEqual(slider.value, (date(2026, 6, 1), date(2026, 6, 30)))
+
+        ui.selectbox(key="period-year").set_value(app.ALL_OPTION).run()
+        self.assertFalse(ui.exception)
+        slider = ui.slider(key="period-range")
+        self.assertEqual(pd.to_datetime(slider.proto.min, unit="us").date(), date(2025, 6, 15))
+        self.assertEqual(pd.to_datetime(slider.proto.max, unit="us").date(), date(2026, 6, 30))
+        self.assertEqual(slider.value, (date(2025, 6, 15), date(2026, 6, 30)))
+
     def test_visual_rates_and_hourly_detail_preserve_totals(self):
         self.write_csv("calls.csv", [
             self.row("2026-06-01 10:01:00", talk=4),

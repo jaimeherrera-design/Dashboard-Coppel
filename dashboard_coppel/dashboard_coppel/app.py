@@ -1,4 +1,5 @@
 from pathlib import Path
+from calendar import monthrange
 from html import escape
 from io import BytesIO
 from base64 import b64encode
@@ -1223,19 +1224,6 @@ ALL_OPTION = "Todos"
 
 def select_period(date_min, date_max) -> dict:
     st.sidebar.markdown("**Periodo**")
-    if date_min < date_max:
-        start, end = st.sidebar.slider(
-            "Rango de fechas",
-            min_value=date_min,
-            max_value=date_max,
-            value=(date_min, date_max),
-            format="DD/MM/YYYY",
-            key="period-range",
-        )
-    else:
-        st.sidebar.caption(f"Rango de fechas disponible: {date_min:%d/%m/%Y}")
-        start = end = date_min
-
     year_col, month_col = st.sidebar.columns(2)
     years = list(range(date_min.year, date_max.year + 1))
     year = year_col.selectbox("Año", [ALL_OPTION] + years, key="period-year")
@@ -1245,6 +1233,50 @@ def select_period(date_min, date_max) -> dict:
         key="period-month",
         format_func=lambda m: m if m == ALL_OPTION else MONTH_NAMES[m - 1],
     )
+
+    range_min, range_max = date_min, date_max
+    if year != ALL_OPTION:
+        range_min = max(range_min, date(year, 1, 1))
+        range_max = min(range_max, date(year, 12, 31))
+    if month != ALL_OPTION:
+        matching_years = [year] if year != ALL_OPTION else years
+        matching_years = [
+            selected_year for selected_year in matching_years
+            if date(selected_year, month, 1) <= date_max
+            and date(selected_year, month, monthrange(selected_year, month)[1]) >= date_min
+        ]
+        if matching_years:
+            first_year, last_year = matching_years[0], matching_years[-1]
+            month_min = max(date_min, date(first_year, month, 1))
+            month_max = min(
+                date_max, date(last_year, month, monthrange(last_year, month)[1]),
+            )
+            range_min = max(range_min, month_min)
+            range_max = min(range_max, month_max)
+
+    if date_min < date_max and range_min <= range_max:
+        selection = (year, month)
+        previous_selection = st.session_state.get("period-filter-selection")
+        current_range = st.session_state.get("period-range", (range_min, range_max))
+        if selection != previous_selection or not isinstance(current_range, (tuple, list)) or len(current_range) != 2:
+            start, end = range_min, range_max
+        else:
+            start = max(current_range[0], range_min)
+            end = min(current_range[1], range_max)
+            if start > end:
+                start, end = range_min, range_max
+        st.session_state["period-filter-selection"] = selection
+        st.session_state["period-range"] = (start, end)
+        start, end = st.sidebar.slider(
+            "Rango de fechas",
+            min_value=range_min,
+            max_value=range_max,
+            format="DD/MM/YYYY",
+            key="period-range",
+        )
+    else:
+        st.sidebar.caption(f"Rango de fechas disponible: {range_min:%d/%m/%Y} - {range_max:%d/%m/%Y}")
+        start, end = range_min, range_max
     return {"start": start, "end": end, "year": year, "month": month}
 
 
