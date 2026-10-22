@@ -36,9 +36,17 @@ class OutcomeViewTests(DataLoadingTests):
             render_outcomes(result)
         self.assertEqual(render.call_args.kwargs["totals"]["calls"], 3)
         self.assertTrue(render.call_args.kwargs["compact"])
+        self.assertEqual(render.call_args.kwargs["expanded_levels"], 2)
+        self.assertEqual(
+            render.call_args.args[1][0][1],
+            "Contacto / No Contacto / Resultado / Mes / Fecha",
+        )
         roots = render.call_args.args[0]
-        self.assertEqual(roots.loc[roots["_depth"].eq(0), "calls"].sum(), 3)
-        self.assertEqual(set(roots["_depth"]), {0, 1, 2})
+        root_rows = roots.loc[roots["_depth"].eq(0)].set_index("label")["calls"]
+        self.assertEqual(root_rows.to_dict(), {"Contacto": 2, "No Contacto": 1})
+        outcome_rows = roots.loc[roots["_depth"].eq(1)].set_index("label")["calls"]
+        self.assertEqual(outcome_rows.to_dict(), {"Busy": 1, "recordatorio": 2})
+        self.assertEqual(set(roots["_depth"]), {0, 1, 2, 3})
         self.filters["Campaign Name"] = ["Missing"]
         self.assertTrue(app.aggregate_outcomes(files, signature, self.filters).empty)
 
@@ -70,11 +78,14 @@ class OutcomeViewTests(DataLoadingTests):
             render_outcomes(outcome)
         roots = render.call_args.args[0]
         self.assertEqual(
-            roots.loc[roots["_depth"].eq(0), "label"].tolist(),
+            roots.loc[roots["_depth"].eq(1), "label"].tolist(),
             ["recordatorio", "Busy"],
         )
         self.assertEqual(render.call_args.kwargs["totals"]["calls"], 3)
-        self.assertEqual(render.call_args.args[1][0][1], "Resultado / Mes / Estado / Fecha")
+        self.assertEqual(
+            render.call_args.args[1][0][1],
+            "Contacto / No Contacto / Resultado / Mes / Estado / Fecha",
+        )
 
     def test_outcome_tab_loads_lazily(self):
         self.write_csv("calls.csv", [self.row("2026-06-01")])

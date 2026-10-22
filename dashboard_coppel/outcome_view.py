@@ -25,25 +25,42 @@ def outcome_figure(table: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def outcome_hierarchy(table: pd.DataFrame) -> pd.DataFrame:
+    groups = []
+    for label, calls, contacts in [
+        ("Contacto", table["contacts"], table["contacts"]),
+        ("No Contacto", table["calls"] - table["contacts"], 0),
+    ]:
+        group = table.copy()
+        group["contact_group"] = label
+        group["calls"] = calls
+        group["contacts"] = contacts
+        group[["talk_sum", "wrap_sum", "wait_sum"]] = 0
+        groups.append(group.loc[group["calls"].gt(0)])
+    grouped = pd.concat(groups, ignore_index=True)
+    return hierarchy_rows(
+        grouped, ["contact_group", "Call Outcome name", "month"]
+        + (["state"] if "state" in table.columns else []) + ["date"],
+    )
+
+
 def render_outcomes(table: pd.DataFrame) -> None:
     if table.empty:
         st.info("No hay llamadas para los filtros seleccionados.")
         return
-    dimensions = ["Call Outcome name", "month"]
-    grouping = ["Resultado", "Mes"]
+    grouping = ["Contacto / No Contacto", "Resultado", "Mes"]
     if "state" in table.columns:
-        dimensions.append("state")
         grouping.append("Estado")
-    dimensions.append("date")
     grouping.append("Fecha")
     height = max(600, table["Call Outcome name"].nunique() * 25 + 150)
     left, right = st.columns([.4, .6])
     with left:
-        display = hierarchy_rows(table, dimensions)
+        display = outcome_hierarchy(table)
         render_interactive_table(
             display, [("label", " / ".join(grouping)), ("calls", "Total llamadas")],
             "Resultado llamadas", height=height, hierarchy=True, compact=True,
             totals={"label": "Total", "calls": int(table["calls"].sum())},
+            expanded_levels=2,
         )
     with right:
         report_chart(outcome_figure(table), height=height, left_margin=185)
