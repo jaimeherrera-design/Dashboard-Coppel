@@ -95,12 +95,16 @@ def classify_detail(chunk: pd.DataFrame, did: pd.DataFrame, ladas: dict) -> pd.D
     chunk = chunk.copy()
     ddi = chunk["DDI"].fillna("").astype(str).map(numeric_code)
     prefix = chunk["phone_prefix"].fillna("").astype(str).map(numeric_code)
-    mapped_did = ddi.map(did["HOMOLOGACION"])
     prior_did = chunk.get("did", pd.Series(UNMAPPED, index=chunk.index))
     prior_did = prior_did.fillna(UNMAPPED).astype(str).str.strip()
+    prior_did_key = (
+        prior_did.str.extract(r"^(\d+)(?:-|$)", expand=False)
+        .fillna("").map(numeric_code)
+    )
+    mapped_did = ddi.map(did["HOMOLOGACION"]).fillna(prior_did_key.map(did["HOMOLOGACION"]))
     prior_did = prior_did.mask(prior_did.str.casefold().isin(["", UNMAPPED.casefold(), "pendiente asignacion"]), UNMAPPED)
     chunk["did"] = mapped_did.fillna(prior_did)
-    mapped_provider = ddi.map(did["NOMBRE"])
+    mapped_provider = ddi.map(did["NOMBRE"]).fillna(prior_did_key.map(did["NOMBRE"]))
     prior_provider = chunk.get("provider", pd.Series(UNMAPPED, index=chunk.index))
     prior_provider = prior_provider.fillna(UNMAPPED).astype(str).str.strip()
     prior_provider = prior_provider.mask(

@@ -18,9 +18,11 @@ El campo `conteo_registros` se usa como cantidad de llamadas; `Talk Time`, `Wait
 `Wrap up time` contienen las sumas por grupo. No se usa `Total Calls` como contador.
 `DDI sin homologar`, `NIR 3 digitos sin homologar`, `Campaign Name sin homologar` y
 `Call Outcome name sin homologar` se vuelven a cruzar con los cuatro maestros de Drive.
-Cuando una clave coincide, prevalece la asignacion del maestro actualizado; las asignaciones
-existentes se conservan si no hay clave de origen o coincidencia nueva, y los pendientes
-siguen pendientes. No se reemplazan los Parquet.
+Cuando una clave coincide, prevalece la asignacion del maestro actualizado. Si falta el DDI
+original, se recupera el codigo numerico inicial de la homologacion previa (por ejemplo,
+`6675302853-PENDIENTE`) y se reintenta el cruce del DID y proveedor con el maestro vigente.
+Las asignaciones previas se conservan si no hay una clave recuperable o coincidencia nueva;
+en esos casos, los pendientes siguen pendientes. No se reemplazan los Parquet.
 Los registros `Pendiente asignacion` se conservan en el total de llamadas, no se cuentan como
 contactos y aparecen como pendientes/sin clasificacion; una altura o posicion de mora pendiente
 se conserva y queda al final del orden, no bloquea la carga. Se requieren los cuatro maestros:
@@ -161,6 +163,7 @@ El grafico de campanas ocupa el ancho completo y compara dos paneles alineados p
 - Muestra llamadas y contactabilidad por DID, y un diagrama TMO/contactabilidad por estado con lineas de referencia del promedio ponderado de las llamadas filtradas.
 - El diagrama por estado muestra los nombres y metricas al pasar el cursor sobre cada punto, sin etiquetas permanentes superpuestas.
 - `Mae_did.xlsx`, en Drive, debe contener `DDI`, `NOMBRE` y `HOMOLOGACION`. El DDI original se vuelve a cruzar, ignorando ceros iniciales (por ejemplo, `0056` y `56`), para completar la homologacion y el proveedor.
+- Si el DDI original esta vacio, se reintenta el cruce desde el codigo al inicio de la homologacion previa cuando ese DDI existe en el maestro; esto actualiza, por ejemplo, `6675302853-PENDIENTE` a la homologacion vigente.
 - `Mae_lada.xlsx` reclasifica el estado desde el NIR original; `Mae_contacto.xlsx` reclasifica cada resultado de llamada y `Mae_Mora.xlsx` asigna altura y posicion desde la campaña original. Un valor nuevo sin coincidencia permanece sin cruce/asignacion.
 - Si falta cualquiera de los maestros, esta bloqueado, incompleto o tiene claves contradictorias, se muestra un error sin presentar totales calculados con cruces parciales.
 - La primera carga prepara resumenes adicionales por Parquet con las dimensiones ya cruzadas. No reemplaza los resumenes principales ni modifica las fuentes. Despues utiliza la cache persistente y solo prepara fuentes nuevas o modificadas.

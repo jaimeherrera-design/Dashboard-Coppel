@@ -34,6 +34,28 @@ class DetailViewTests(DataLoadingTests):
         self.assertEqual(result.loc[1, "provider"], "IPCOM")
         self.assertEqual(result.loc[1, "state"], "CDMX")
 
+    def test_missing_source_ddi_recrosses_embedded_ddi_from_prior_homologation(self):
+        pd.DataFrame({
+            "DDI": ["6675302853"],
+            "NOMBRE": ["DIRECTO"],
+            "HOMOLOGACION": ["6675302853-DIRECTO"],
+        }).to_excel(self.did_mapping, index=False)
+        did, ladas = load_detail_masters(
+            app.file_signature(self.did_mapping), app.file_signature(self.lada_mapping),
+        )
+        chunk = pd.DataFrame({
+            "DDI": [""],
+            "phone_prefix": [""],
+            "did": ["6675302853-PENDIENTE"],
+            "provider": ["Sin cruce"],
+            "Call end": pd.to_datetime(["2026-10-01"]),
+        })
+
+        result = classify_detail(chunk, did, ladas)
+
+        self.assertEqual(result.loc[0, "did"], "6675302853-DIRECTO")
+        self.assertEqual(result.loc[0, "provider"], "DIRECTO")
+
     def test_pagination_preserves_full_table_and_weighted_totals(self):
         table = pd.DataFrame({
             "did": [f"DID-{index}" for index in range(205)],
