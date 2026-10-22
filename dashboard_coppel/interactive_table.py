@@ -5,12 +5,13 @@ import pandas as pd
 import streamlit.components.v1 as components
 
 
-def table_html(data: pd.DataFrame, columns: list[tuple[str, str]], title: str, *, hierarchy: bool = False, totals: dict | None = None, compact: bool = False, page_size: int = 0) -> str:
+def table_html(data: pd.DataFrame, columns: list[tuple[str, str]], title: str, *, hierarchy: bool = False, totals: dict | None = None, compact: bool = False, page_size: int = 0, expanded_by_default: bool = True) -> str:
     payload = json.dumps(
         {
             "rows": data[[key for key, _ in columns] + (["_id", "_parent", "_depth"] if hierarchy else [])].to_dict(orient="records"),
             "columns": [{"key": key, "label": label} for key, label in columns],
             "hierarchy": hierarchy,
+            "expanded_by_default": expanded_by_default,
             "totals": totals,
             "compact": compact,
             "page_size": page_size,
@@ -73,7 +74,7 @@ for(const col of data.columns){
     maxima[col.key]=data.rows.reduce((maximum,row)=>Math.max(maximum,row[col.key]),1);
   }
 }
-const expanded=new Set(data.hierarchy?data.rows.filter(row=>row._depth===0).map(row=>row._id):[]);
+const expanded=new Set(data.hierarchy&&data.expanded_by_default?data.rows.filter(row=>row._depth===0).map(row=>row._id):[]);
 const search=document.getElementById("search");
 const formatInt=new Intl.NumberFormat("es-CO",{maximumFractionDigits:0});
 const formatOne=new Intl.NumberFormat("es-CO",{minimumFractionDigits:1,maximumFractionDigits:1});
@@ -201,5 +202,8 @@ render();
     )
 
 
-def render_interactive_table(data: pd.DataFrame, columns: list[tuple[str, str]], title: str, *, height: int = 324, hierarchy: bool = False, totals: dict | None = None, compact: bool = False, page_size: int = 0) -> None:
-    components.html(table_html(data, columns, title, hierarchy=hierarchy, totals=totals, compact=compact, page_size=page_size), height=height, scrolling=False)
+def render_interactive_table(data: pd.DataFrame, columns: list[tuple[str, str]], title: str, *, height: int = 324, hierarchy: bool = False, totals: dict | None = None, compact: bool = False, page_size: int = 0, expanded_by_default: bool = True) -> None:
+    components.html(table_html(
+        data, columns, title, hierarchy=hierarchy, totals=totals, compact=compact,
+        page_size=page_size, expanded_by_default=expanded_by_default,
+    ), height=height, scrolling=False)

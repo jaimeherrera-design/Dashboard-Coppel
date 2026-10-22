@@ -7,13 +7,33 @@ import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 import app
-from detail_view import load_detail_masters, hierarchy_rows, numeric_code, phone_prefix, did_volume_figure, state_figure, detail_table, render_detail, render_detail_page, select_detail_rows, detail_csv, detail_page_html
+from detail_view import load_detail_masters, hierarchy_rows, numeric_code, phone_prefix, did_volume_figure, state_figure, detail_table, render_detail, render_detail_page, select_detail_rows, detail_csv, detail_page_html, classify_detail
 from data_cache import iter_summary, load_summary, SUMMARY_KEYS
 from interactive_table import table_html
 from test_data_loading import DataLoadingTests
 
 
 class DetailViewTests(DataLoadingTests):
+    def test_detail_recross_updates_pending_values_and_preserves_existing_matches(self):
+        did, ladas = load_detail_masters(
+            app.file_signature(self.did_mapping), app.file_signature(self.lada_mapping),
+        )
+        chunk = pd.DataFrame({
+            "DDI": ["777", "0056"],
+            "phone_prefix": ["777", "551"],
+            "did": ["Existing DID", "Sin cruce"],
+            "provider": ["Existing provider", "Sin cruce"],
+            "state": ["Existing state", "Sin cruce"],
+            "Call end": pd.to_datetime(["2026-06-01", "2026-06-02"]),
+        })
+        result = classify_detail(chunk, did, ladas)
+        self.assertEqual(result.loc[0, "did"], "Existing DID")
+        self.assertEqual(result.loc[0, "provider"], "Existing provider")
+        self.assertEqual(result.loc[0, "state"], "Existing state")
+        self.assertEqual(result.loc[1, "did"], "56-IPCOM")
+        self.assertEqual(result.loc[1, "provider"], "IPCOM")
+        self.assertEqual(result.loc[1, "state"], "CDMX")
+
     def test_pagination_preserves_full_table_and_weighted_totals(self):
         table = pd.DataFrame({
             "did": [f"DID-{index}" for index in range(205)],
@@ -87,6 +107,18 @@ detail_table(table, ["did", "month", "provider"], "Detalle", height=700, page_si
         self.assertFalse(ui.exception)
         self.assertEqual(len(csv.call_args.args[0]), 615)
         self.assertEqual(len(ui.get("download_button")), 1)
+
+    def test_interactive_hierarchy_can_start_collapsed(self):
+        tree = pd.DataFrame({
+            "label": ["Parent", "Child"], "_id": ["parent", "child"],
+            "_parent": ["", "parent"], "_depth": [0, 1], "calls": [2, 2],
+        })
+        html = table_html(
+            tree, [("label", "Dimension"), ("calls", "Calls")],
+            "Collapsed", hierarchy=True, expanded_by_default=False,
+        )
+        self.assertIn('"expanded_by_default": false', html)
+        self.assertIn("data.hierarchy&&data.expanded_by_default", html)
 
     def test_table_styles_headers_indentation_subtotals_and_escapes_labels(self):
         table = pd.DataFrame({

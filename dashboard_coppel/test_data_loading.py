@@ -132,8 +132,32 @@ class DataLoadingTests(unittest.TestCase):
         self.write_mapping(["No Contacto", "No Contacto"])
         self.assertEqual(self.result()["contacts"], 0)
         self.assertEqual(
-            app.load_contact_outcomes(app.file_signature(self.mapping)), set()
+            app.load_contact_outcomes(app.file_signature(self.mapping)),
+            {"recordatorio": "no contacto", "busy": "no contacto"},
         )
+
+    def test_contact_recross_updates_matches_and_preserves_prior_unmatched_assignments(self):
+        chunk = pd.DataFrame({
+            "Call Outcome name": ["Busy", "New result", "Pending result"],
+            "contact_flag": ["Contacto", "Contacto", "Pendiente asignacion"],
+            "calls": [2, 3, 4],
+            "contacts": [2, 3, 0],
+        })
+        result = app.assign_contact_counts(chunk, {"busy": "no contacto"})
+        self.assertEqual(result["contact_flag"].tolist(), [
+            "No Contacto", "Contacto", "Pendiente asignacion",
+        ])
+        self.assertEqual(result["contacts"].tolist(), [0, 3, 0])
+
+    def test_mora_recross_assigns_pending_and_preserves_existing_unmatched_height(self):
+        chunk = pd.DataFrame({
+            "Campaign Name": ["Sin altura de mora", "Altura anterior"],
+            "source_campaign": ["Cobranza", "Campaña nueva"],
+            "mora_position": [float("inf"), 3],
+        })
+        result = app.apply_mora(chunk, {"mora_master": app.file_signature(self.mora_mapping)})
+        self.assertEqual(result["Campaign Name"].tolist(), ["MORA 1", "Altura anterior"])
+        self.assertEqual(result["mora_position"].tolist(), [1, 3])
 
     def test_invalid_sources_raise_explicit_errors(self):
         with self.assertRaisesRegex(ValueError, "No se encontraron"):

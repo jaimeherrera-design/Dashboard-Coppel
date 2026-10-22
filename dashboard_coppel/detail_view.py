@@ -13,7 +13,7 @@ from mora import position, sort_by_mora
 from report_view import BLUE, LIGHT_BLUE, GREEN, presentation_metrics, report_chart
 
 
-DETAIL_VERSION = "daily-did-phone-prefix-v4-crossed-contacts"
+DETAIL_VERSION = "daily-did-phone-prefix-v5-drive-master-recross"
 METRICS = ["calls", "contacts", "talk_sum", "wrap_sum", "wait_sum"]
 UNMAPPED = "Sin cruce"
 
@@ -93,12 +93,25 @@ def phone_state(prefix: pd.Series, ladas: dict) -> pd.Series:
 
 def classify_detail(chunk: pd.DataFrame, did: pd.DataFrame, ladas: dict) -> pd.DataFrame:
     chunk = chunk.copy()
-    if "did" not in chunk:
-        chunk["did"] = chunk["DDI"].map(did["HOMOLOGACION"]).fillna(UNMAPPED)
-    if "provider" not in chunk:
-        chunk["provider"] = chunk["DDI"].map(did["NOMBRE"]).fillna(UNMAPPED)
-    if "state" not in chunk:
-        chunk["state"] = phone_state(chunk["phone_prefix"], ladas)
+    ddi = chunk["DDI"].fillna("").astype(str).map(numeric_code)
+    prefix = chunk["phone_prefix"].fillna("").astype(str).map(numeric_code)
+    mapped_did = ddi.map(did["HOMOLOGACION"])
+    prior_did = chunk.get("did", pd.Series(UNMAPPED, index=chunk.index))
+    prior_did = prior_did.fillna(UNMAPPED).astype(str).str.strip()
+    prior_did = prior_did.mask(prior_did.str.casefold().isin(["", UNMAPPED.casefold(), "pendiente asignacion"]), UNMAPPED)
+    chunk["did"] = mapped_did.fillna(prior_did)
+    mapped_provider = ddi.map(did["NOMBRE"])
+    prior_provider = chunk.get("provider", pd.Series(UNMAPPED, index=chunk.index))
+    prior_provider = prior_provider.fillna(UNMAPPED).astype(str).str.strip()
+    prior_provider = prior_provider.mask(
+        prior_provider.str.casefold().isin(["", UNMAPPED.casefold(), "pendiente asignacion"]), UNMAPPED,
+    )
+    chunk["provider"] = mapped_provider.fillna(prior_provider)
+    mapped_state = phone_state(prefix, ladas)
+    prior_state = chunk.get("state", pd.Series(UNMAPPED, index=chunk.index))
+    prior_state = prior_state.fillna(UNMAPPED).astype(str).str.strip().replace("", UNMAPPED)
+    prior_state = prior_state.mask(prior_state.str.casefold().eq("pendiente asignacion"), UNMAPPED)
+    chunk["state"] = mapped_state.where(mapped_state.ne(UNMAPPED), prior_state)
     chunk["month"] = chunk["Call end"].dt.to_period("M").astype(str)
     return chunk
 

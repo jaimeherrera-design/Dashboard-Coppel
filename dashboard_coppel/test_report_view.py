@@ -59,6 +59,40 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
             {"Año": False, "Mes": False},
         )
 
+    def test_date_range_bounds_follow_selected_year_and_month(self):
+        from datetime import date
+
+        ui = AppTest.from_string(
+            "from datetime import date\n"
+            "import app\n"
+            "app.select_period(date(2025, 6, 15), date(2026, 8, 20))"
+        ).run()
+        self.assertFalse(ui.exception)
+        slider = ui.slider(key="period-range")
+        self.assertEqual(pd.to_datetime(slider.proto.min, unit="us").date(), date(2025, 6, 15))
+        self.assertEqual(pd.to_datetime(slider.proto.max, unit="us").date(), date(2026, 8, 20))
+
+        ui.selectbox(key="period-year").set_value(2026).run()
+        self.assertFalse(ui.exception)
+        slider = ui.slider(key="period-range")
+        self.assertEqual(pd.to_datetime(slider.proto.min, unit="us").date(), date(2026, 1, 1))
+        self.assertEqual(pd.to_datetime(slider.proto.max, unit="us").date(), date(2026, 8, 20))
+        self.assertEqual(slider.value, (date(2026, 1, 1), date(2026, 8, 20)))
+
+        ui.selectbox(key="period-month").set_value(6).run()
+        self.assertFalse(ui.exception)
+        slider = ui.slider(key="period-range")
+        self.assertEqual(pd.to_datetime(slider.proto.min, unit="us").date(), date(2026, 6, 1))
+        self.assertEqual(pd.to_datetime(slider.proto.max, unit="us").date(), date(2026, 6, 30))
+        self.assertEqual(slider.value, (date(2026, 6, 1), date(2026, 6, 30)))
+
+        ui.selectbox(key="period-year").set_value(app.ALL_OPTION).run()
+        self.assertFalse(ui.exception)
+        slider = ui.slider(key="period-range")
+        self.assertEqual(pd.to_datetime(slider.proto.min, unit="us").date(), date(2025, 6, 15))
+        self.assertEqual(pd.to_datetime(slider.proto.max, unit="us").date(), date(2026, 6, 30))
+        self.assertEqual(slider.value, (date(2025, 6, 15), date(2026, 6, 30)))
+
     def test_visual_rates_and_hourly_detail_preserve_totals(self):
         self.write_csv("calls.csv", [
             self.row("2026-06-01 10:01:00", talk=4),
@@ -131,6 +165,49 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
             self.assertEqual(totals["tmo"], 7)
             self.assertEqual(totals["idle"], 2)
 
+    def test_raw_campaign_filter_and_first_tables_use_source_campaign(self):
+        self.write_csv("calls.csv", [
+            self.row("2026-06-01", campaign="Campaña original A"),
+            self.row("2026-06-02", campaign="Campaña original B", outcome="Busy"),
+        ])
+        chunk = pd.DataFrame({
+            "Call end": pd.to_datetime(["2026-06-01", "2026-06-02"]),
+            "Campaign Name": ["MORA 1", "MORA 1"],
+            "source_campaign": ["Campaña original A", "Campaña original B"],
+            "Call Type": ["Outbound", "Outbound"],
+            "Term Reason": ["Completed", "Completed"],
+        })
+        selected = {**self.filters, "source_campaign": ["Campaña original B"]}
+        self.assertEqual(
+            chunk.loc[app.selected_mask(chunk, selected), "source_campaign"].tolist(),
+            ["Campaña original B"],
+        )
+
+        result = self.result()
+        self.filters["source_campaign"] = ["Campaña original B"]
+        filtered_result = self.result()
+        self.assertEqual(filtered_result["total"], 1)
+        self.assertEqual(filtered_result["campaign_source"]["source_campaign"].tolist(), ["Campaña original B"])
+        with patch("report_view.render_interactive_table") as rendered, patch("report_view.st.markdown"), \
+             patch("report_view.st.plotly_chart"), patch("report_view.st.caption"):
+            render_report(
+                result,
+                pd.DataFrame(columns=["day_of_month", "hour", "calls", "contacts"]),
+            )
+        first_table = rendered.call_args_list[0].args[0]
+        second_table = rendered.call_args_list[1].args[0]
+        self.assertEqual(list(rendered.call_args_list[0].args[1])[0], ("label", "Año · Mes"))
+        self.assertEqual(list(rendered.call_args_list[1].args[1])[0], ("label", "Altura de mora"))
+        self.assertTrue(rendered.call_args_list[0].kwargs["hierarchy"])
+        self.assertTrue(rendered.call_args_list[1].kwargs["hierarchy"])
+        self.assertFalse(rendered.call_args_list[0].kwargs["expanded_by_default"])
+        self.assertFalse(rendered.call_args_list[1].kwargs["expanded_by_default"])
+        self.assertEqual(first_table.loc[first_table["_depth"].eq(0), "label"].tolist(), ["2026-06"])
+        self.assertEqual(
+            set(second_table.loc[second_table["_depth"].eq(1), "label"]),
+            {"Campaña original A", "Campaña original B"},
+        )
+
     def test_rate_lines_are_taller_and_leave_room_for_labels(self):
         table = pd.DataFrame({
             "weekday": ["Lun", "Mar"], "calls": [100, 100], "contacts": [4, 8],
@@ -191,10 +268,14 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
                 "Mae_Mora.xlsx": app.file_signature(mora),
             },
         )
-        with patch.object(app, "DATA_ROOT", self.root), patch.object(app, "discover_drive_sources", return_value=sources):
+        with patch.object(app, "DATA_ROOT", self.root), patch.object(
+            app, "discover_dashboard_sources",
+            return_value=(sources.parquet, sources.masters),
+        ):
             ui = AppTest.from_string("import app\napp.main()", default_timeout=30).run()
         self.assertFalse(ui.exception)
         self.assertFalse(ui.error)
+        self.assertEqual(ui.multiselect(key="source_campaign").label, "Campaña")
         banners = [element.value for element in ui.markdown if '<header class="executive-banner">' in element.value]
         self.assertEqual(len(banners), 1)
         self.assertIn('alt="Coppel"', banners[0])
@@ -218,7 +299,10 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
         self.assertEqual(len(ui.tabs[0].get("iframe")), 2)
         self.assertEqual(len(ui.tabs[1].get("iframe")), 0)
         self.assertTrue(any("DÍA DEL MES Y HORA" in item.value for item in ui.markdown))
-        with patch.object(app, "DATA_ROOT", self.root), patch.object(app, "discover_drive_sources", return_value=sources):
+        with patch.object(app, "DATA_ROOT", self.root), patch.object(
+            app, "discover_dashboard_sources",
+            return_value=(sources.parquet, sources.masters),
+        ):
             ui.session_state["dashboard-pages"] = "DETALLE DID / ESTADO"
             ui.run()
         self.assertFalse(ui.exception)
@@ -242,7 +326,16 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
 
     def test_detail_master_error_does_not_hide_principal(self):
         self.write_csv("calls.csv", [self.row("2026-06-01")])
-        with patch.object(app, "DATA_ROOT", self.root), patch.object(app, "CONTACT_MAPPING_FILE", self.mapping), patch.object(app, "DID_MAPPING_FILE", self.root / "missing.xlsx"), patch.object(app, "LADA_MAPPING_FILE", self.lada_mapping):
+        files = app.discover_csv_files(self.root)
+        masters = {
+            "Mae_contacto.xlsx": app.file_signature(self.mapping),
+            "Mae_did.xlsx": (str(self.root / "missing.xlsx"), 0, 0),
+            "Mae_lada.xlsx": app.file_signature(self.lada_mapping),
+            "Mae_Mora.xlsx": app.file_signature(self.mora_mapping),
+        }
+        with patch.object(app, "DATA_ROOT", self.root), patch.object(
+            app, "discover_dashboard_sources", return_value=(files, masters),
+        ):
             ui = AppTest.from_string("import app\napp.main()", default_timeout=30).run()
             self.assertFalse(ui.error)
             self.assertEqual(len(ui.tabs[0].get("plotly_chart")), 6)

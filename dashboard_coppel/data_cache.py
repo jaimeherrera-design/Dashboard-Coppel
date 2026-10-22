@@ -10,7 +10,7 @@ from threading import Lock, RLock
 import pandas as pd
 
 
-SUMMARY_VERSION = "hourly-outcome-v3-crossed-contacts"
+SUMMARY_VERSION = "hourly-outcome-v4-drive-master-recross"
 SUMMARY_KEYS = ["Call end", "Call Type", "Campaign Name", "Term Reason", "Call Outcome name"]
 SUMMARY_METRICS = ["calls", "contacts", "talk_sum", "wrap_sum", "wait_sum"]
 FileSignature = tuple[str, int, int]
@@ -114,7 +114,7 @@ def _prepare_summary(
     directory.mkdir(exist_ok=True)
     key = hashlib.sha256((str(source.resolve()) + namespace).encode("utf-8")).hexdigest()
     cache = directory / f"{key}.sqlite"
-    identity = json.dumps([version, *signature])
+    identity = json.dumps([version, *signature, keys, SUMMARY_METRICS])
     if cache.exists():
         with closing(sqlite3.connect(cache)) as connection:
             stored = connection.execute("SELECT identity FROM metadata").fetchone()

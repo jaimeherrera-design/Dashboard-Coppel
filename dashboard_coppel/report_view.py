@@ -42,22 +42,69 @@ def report_chart(fig: go.Figure, height: int = 320, left_margin: int = 40) -> No
     st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
 
 
-def report_table(table: pd.DataFrame, dimension: str, title: str, total: dict, performance: bool = False) -> None:
+def report_table(
+    table: pd.DataFrame, dimension: str | list[tuple[str, str]], title: str,
+    total: dict, performance: bool = False, *, hierarchy: bool = False,
+) -> None:
     table = presentation_metrics(table)
-    columns = [(dimension, title), ("calls", "Total llamadas"), ("contacts", "Llamadas contactadas"), ("rate", "% Contactabilidad")]
+    dimensions = [(dimension, title)] if isinstance(dimension, str) else dimension
+    columns = ([("label", dimensions[0][1])] if hierarchy else dimensions) + [
+        ("calls", "Total llamadas"), ("contacts", "Llamadas contactadas"), ("rate", "% Contactabilidad"),
+    ]
     if performance:
         columns += [("tmo", "TMO (s)"), ("idle", "Idle (s)")]
-    display = table[[key for key, _ in columns]].copy()
+    display = table[[key for key, _ in columns if key != "label"]].copy()
+    if hierarchy:
+        display.insert(0, "label", table["label"].values)
+        display[["_id", "_parent", "_depth"]] = table[["_id", "_parent", "_depth"]].values
     display["rate"] *= 100
     calls = total["total"]
     denominator = calls if calls else 1
     totals = {
-        dimension: "Total", "calls": calls, "contacts": total["contacts"],
+        **({"label": "Total"} if hierarchy else {
+            key: "Total" if index == 0 else "" for index, (key, _) in enumerate(dimensions)
+        }),
+        "calls": calls, "contacts": total["contacts"],
         "rate": total["contacts"] / denominator * 100,
         "tmo": (total["talk_sum"] + total["wrap_sum"]) / denominator,
         "idle": total["wait_sum"] / denominator,
     }
-    render_interactive_table(display, columns, title, totals=totals)
+    render_interactive_table(
+        display, columns, title, totals=totals, hierarchy=hierarchy,
+        expanded_by_default=not hierarchy,
+    )
+
+
+def campaign_hierarchy(table: pd.DataFrame, parent: str) -> pd.DataFrame:
+    dimensions = [parent, "source_campaign"]
+    grouped = table.groupby(dimensions, as_index=False)[
+        ["calls", "contacts", "talk_sum", "wrap_sum", "wait_sum"]
+    ].sum()
+    rows = []
+    for parent_value, children in grouped.groupby(parent, sort=False):
+        parent_id = f"parent:{parent_value}"
+        parent_totals = children[["calls", "contacts", "talk_sum", "wrap_sum", "wait_sum"]].sum()
+        rows.append({
+            parent: parent_value,
+            "source_campaign": "",
+            "label": str(parent_value),
+            "_id": parent_id,
+            "_parent": "",
+            "_depth": 0,
+            **parent_totals.to_dict(),
+        })
+        for child in children.itertuples(index=False):
+            values = child._asdict()
+            rows.append({
+                parent: parent_value,
+                "source_campaign": values["source_campaign"],
+                "label": str(values["source_campaign"]),
+                "_id": f"{parent_id}:campaign:{values['source_campaign']}",
+                "_parent": parent_id,
+                "_depth": 1,
+                **{key: values[key] for key in ("calls", "contacts", "talk_sum", "wrap_sum", "wait_sum")},
+            })
+    return pd.DataFrame(rows)
 
 
 def heat_table(table: pd.DataFrame, dimension: str, order: list, title: str) -> None:
@@ -163,13 +210,21 @@ def render_report(result: dict, hourly_days: pd.DataFrame) -> None:
         return
     monthly = presentation_metrics(result["month"]).sort_values("month")
     campaigns = sort_by_mora(presentation_metrics(result["campaign"]))
+    month_campaigns = campaign_hierarchy(result["month_campaign"], "month")
+    mora_campaigns = campaign_hierarchy(result["campaign_source_mora"], "Campaign Name")
     left, right = st.columns(2)
     with left:
         with st.container(border=False, key="report-month-table"):
-            report_table(monthly, "month", "Año · Mes", result, performance=True)
+            report_table(
+                month_campaigns, [("month", "Año · Mes")], "Año · Mes",
+                result, performance=True, hierarchy=True,
+            )
     with right:
         with st.container(border=False, key="report-campaign-table"):
-            report_table(campaigns, "Campaign Name", "Altura de mora", result, performance=True)
+            report_table(
+                mora_campaigns, [("Campaign Name", "Altura de mora")],
+                "Altura de mora", result, performance=True, hierarchy=True,
+            )
     left, right = st.columns(2)
     with left:
         with st.container(border=False, key="report-month-volume"):

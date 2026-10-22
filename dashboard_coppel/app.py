@@ -1,4 +1,6 @@
 from pathlib import Path
+from calendar import monthrange
+from datetime import date
 from html import escape
 from io import BytesIO
 from base64 import b64encode
@@ -55,11 +57,11 @@ REQUIRED_COLUMNS = [
 ]
 EXCLUDED_CAMPAIGN_PATTERN = r"test|prueba"
 NOT_DIALER_CALL_TYPES = {"manual", "preview", "vista previa"}
-FILTER_VERSION = "campaign-exclusion-v10-crossed-drive-parquet"
+FILTER_VERSION = "campaign-exclusion-v12-source-campaign-filter"
 GROUP_METRICS = ["calls", "contacts", "talk_sum", "wrap_sum", "wait_sum"]
-STATE_VERSION = "state-hourly-v4-crossed-contacts"
-OUTCOME_VERSION = "daily-outcomes-v3-crossed-contacts"
-OUTCOME_STATE_VERSION = "daily-outcome-states-v4-crossed-contacts"
+STATE_VERSION = "state-hourly-v5-drive-master-recross"
+OUTCOME_VERSION = "daily-outcomes-v4-drive-master-recross"
+OUTCOME_STATE_VERSION = "daily-outcome-states-v5-drive-master-recross"
 CONSOLIDATED_COLUMN_MAP = {
     "Call end": "Hora",
     "Talk Time": "Talk Time",
@@ -89,7 +91,7 @@ CONSOLIDATED_DETAIL_COLUMNS = {
 CONSOLIDATED_CONTACT_COLUMN = "Contacto / No Contacto"
 CONSOLIDATED_POSITION_COLUMN = "Posicion"
 CONSOLIDATED_SOURCE_CAMPAIGN_COLUMN = "Campaign Name sin homologar"
-DRIVE_MASTER_NAMES = ("Mae_did.xlsx",)
+DRIVE_MASTER_NAMES = ("Mae_contacto.xlsx", "Mae_did.xlsx", "Mae_lada.xlsx", "Mae_Mora.xlsx")
 PPT_NAVY = RGBColor(244, 247, 251)
 PPT_SURFACE = RGBColor(255, 255, 255)
 PPT_LINE = RGBColor(218, 228, 238)
@@ -345,13 +347,9 @@ def read_file_chunks(path: Path, columns: list[str], *, detail: bool):
                         chunk["contact_flag"] = contact_flag
                         chunk["_contacts"] = counts * normalized_flag.eq("contacto").astype(int)
                         chunk["source_campaign"] = chunk.pop(CONSOLIDATED_SOURCE_CAMPAIGN_COLUMN)
-                        positions = pd.to_numeric(chunk.pop(CONSOLIDATED_POSITION_COLUMN), errors="coerce")
-                        pending_mora = chunk["Campaign Name"].fillna("").astype(str).str.strip().str.casefold().eq(
-                            "pendiente asignacion"
-                        )
-                        if (positions.isna() & ~pending_mora).any():
-                            raise ValueError(f"{CONSOLIDATED_POSITION_COLUMN} debe ser numérica.")
-                        chunk["mora_position"] = positions.fillna(float("inf"))
+                        chunk["mora_position"] = pd.to_numeric(
+                            chunk.pop(CONSOLIDATED_POSITION_COLUMN), errors="coerce",
+                        ).fillna(float("inf"))
                     if detail:
                         for target, source in detail_columns.items():
                             chunk[target] = chunk.pop(source)
@@ -393,12 +391,15 @@ def read_source_chunks(files: tuple[FileSignature, ...], status=None, *, detail:
             raise ValueError(f"La fuente cambió durante la carga: {path.name}. Actualiza las fuentes.")
 
 
-def scan_metadata(files: tuple[FileSignature, ...], status=None, mora_signature: FileSignature | None = None) -> dict:
-    options = {name: set() for name in ["Call Type", "Campaign Name", "Term Reason", "State"]}
+def scan_metadata(
+    files: tuple[FileSignature, ...], status=None, mora_signature: FileSignature | None = None,
+    detail_masters: tuple[FileSignature, FileSignature | None] | None = None,
+) -> dict:
+    options = {name: set() for name in ["Call Type", "Campaign Name", "source_campaign", "Term Reason", "State"]}
     mora_order = {}
     minimum = None
     maximum = None
-    for chunk in read_source_summaries(files, status):
+    for chunk in read_source_summaries(files, status, {"detail_masters": detail_masters}):
         chunk = chunk.loc[
             ~chunk.get("source_campaign", chunk["Campaign Name"]).fillna("").astype(str).str.contains(
                 EXCLUDED_CAMPAIGN_PATTERN, case=False, na=False
@@ -410,7 +411,9 @@ def scan_metadata(files: tuple[FileSignature, ...], status=None, mora_signature:
             minimum = dates.min() if minimum is None else min(minimum, dates.min())
             maximum = dates.max() if maximum is None else max(maximum, dates.max())
         for name in options:
-            column = "state" if name == "State" else name
+            column = {"State": "state"}.get(name, name)
+            if name == "source_campaign":
+                column = "source_campaign" if "source_campaign" in chunk else "Campaign Name"
             if column in chunk:
                 options[name].update(chunk[column].unique())
         if "mora_position" in chunk:
@@ -420,6 +423,7 @@ def scan_metadata(files: tuple[FileSignature, ...], status=None, mora_signature:
     if status is not None:
         status.update(label="Metadatos listos", state="complete")
     options = {key: sorted(value) for key, value in options.items()}
+    options["source_campaign"] = sorted(options["source_campaign"])
     if mora_order:
         options["Campaign Name"] = sorted(
             options["Campaign Name"], key=lambda label: (mora_order.get(label, float("inf")), label)
@@ -441,21 +445,45 @@ def apply_mora(chunk: pd.DataFrame, filters: dict) -> pd.DataFrame:
     mora_signature = filters.get("mora_master")
     if mora_signature is None:
         return chunk
-    mapping, _ = load_mora(mora_signature)
-    chunk["Campaign Name"] = map_campaigns(chunk["Campaign Name"], mapping, EXCLUDED_CAMPAIGN_PATTERN)
+    mapping, order = load_mora(mora_signature)
+    campaign = chunk.get("source_campaign", chunk["Campaign Name"])
+    mapped = map_campaigns(campaign, mapping, EXCLUDED_CAMPAIGN_PATTERN)
+    previous = chunk["Campaign Name"].fillna("").astype(str).str.strip()
+    original_campaign = campaign.fillna("").astype(str).str.strip()
+    pending = previous.str.casefold().isin(["", UNMAPPED_MORA.casefold(), "pendiente asignacion"])
+    preserve = mapped.eq(UNMAPPED_MORA) & ~pending & previous.ne(original_campaign)
+    chunk["Campaign Name"] = mapped.where(~preserve, previous)
+    positions = chunk["Campaign Name"].map(order)
+    if "mora_position" in chunk:
+        stored = pd.to_numeric(chunk["mora_position"], errors="coerce")
+        positions = positions.where(~preserve, stored)
+    chunk["mora_position"] = positions.fillna(float("inf"))
     return chunk
 
 
-def assign_contact_counts(chunk: pd.DataFrame, outcomes: set[str] | None) -> pd.DataFrame:
+def assign_contact_counts(chunk: pd.DataFrame, outcomes: dict[str, str] | None) -> pd.DataFrame:
     if outcomes is None:
         chunk["contacts"] = pd.to_numeric(chunk["contacts"], errors="coerce").fillna(0)
     else:
-        chunk["contacts"] = chunk["calls"] * chunk["Call Outcome name"].str.casefold().isin(outcomes).astype(int)
+        normalized = chunk["Call Outcome name"].fillna("").astype(str).str.strip().str.casefold()
+        classification = normalized.map(outcomes)
+        if "contact_flag" in chunk:
+            previous = chunk["contact_flag"].fillna("").astype(str).str.strip().str.casefold()
+            previous = previous.where(previous.isin(["contacto", "no contacto"]))
+            classification = classification.fillna(previous)
+        classification = classification.fillna("pendiente asignacion")
+        labels = {
+            "contacto": "Contacto",
+            "no contacto": "No Contacto",
+            "pendiente asignacion": "Pendiente asignacion",
+        }
+        chunk["contact_flag"] = classification.map(labels)
+        chunk["contacts"] = chunk["calls"] * classification.eq("contacto").astype(int)
     return chunk
 
 
 @st.cache_data(show_spinner="Cargando clasificación de Contacto/No Contacto...")
-def load_contact_outcomes(mapping_signature: FileSignature) -> set[str]:
+def load_contact_outcomes(mapping_signature: FileSignature) -> dict[str, str]:
     file_path, _, _ = mapping_signature
     mapping = pd.read_excel(file_path)
     required = ["Call Outcome name", "Contacto / No Contacto"]
@@ -476,12 +504,15 @@ def load_contact_outcomes(mapping_signature: FileSignature) -> set[str]:
         raise ValueError("El maestro contiene clasificaciones contradictorias para un mismo resultado de llamada.")
     if file_signature(Path(file_path)) != mapping_signature:
         raise ValueError("El maestro de contactos cambió durante la carga. Actualiza las fuentes.")
-    return set(mapping.loc[mapping["contact_flag"].eq("contacto"), "call_outcome_name"])
+    return dict(zip(mapping["call_outcome_name"], mapping["contact_flag"]))
 
 
 @st.cache_data(show_spinner=False)
-def dashboard_metadata(files: tuple[FileSignature, ...], version: str, mora_signature: FileSignature | None = None) -> dict:
-    return scan_metadata(files, mora_signature=mora_signature)
+def dashboard_metadata(
+    files: tuple[FileSignature, ...], version: str, mora_signature: FileSignature | None = None,
+    detail_masters: tuple[FileSignature, FileSignature | None] | None = None,
+) -> dict:
+    return scan_metadata(files, mora_signature=mora_signature, detail_masters=detail_masters)
 
 
 def clean_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
@@ -506,16 +537,22 @@ def clean_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
 
 
 def read_source_summaries(files: tuple[FileSignature, ...], status=None, filters: dict | None = None):
+    filters = filters or {}
     states = (filters or {}).get("State")
     consolidated_files = [is_consolidated_source(Path(signature[0])) for signature in files]
     if states and not all(consolidated_files):
         _, ladas = load_detail_masters(*filters["detail_masters"])
         for summary in read_state_summaries(files, ladas, status, states):
+            if "source_campaign" not in summary:
+                summary["source_campaign"] = summary["Campaign Name"]
             yield summary
         return
     for signature in files:
         consolidated = is_consolidated_source(Path(signature[0]))
-        keys = SUMMARY_KEYS + ["state"] if consolidated else SUMMARY_KEYS
+        if consolidated and filters.get("detail_masters"):
+            keys = SUMMARY_KEYS + ["DDI", "phone_prefix", "state"]
+        else:
+            keys = SUMMARY_KEYS + ["state"] if consolidated else SUMMARY_KEYS
         if is_crossed_source(Path(signature[0])):
             keys += ["contact_flag", "mora_position", "source_campaign"]
         summary = load_summary(
@@ -529,10 +566,18 @@ def read_source_summaries(files: tuple[FileSignature, ...], status=None, filters
             version=f"{SUMMARY_VERSION}-crossed" if consolidated else SUMMARY_VERSION,
             namespace="consolidated" if consolidated else "",
         )
+        if "source_campaign" not in summary:
+            summary["source_campaign"] = summary["Campaign Name"]
+        detail_masters = filters.get("detail_masters")
+        if detail_masters and "phone_prefix" in summary:
+            _, ladas = load_detail_masters(*detail_masters)
+            prefixes = summary["phone_prefix"].fillna("").astype(str).map(numeric_code)
+            mapped_state = phone_state(prefixes, ladas)
+            prior_state = summary["state"].fillna(UNMAPPED).astype(str).str.strip().replace("", UNMAPPED)
+            prior_state = prior_state.mask(prior_state.str.casefold().eq("pendiente asignacion"), UNMAPPED)
+            summary["state"] = mapped_state.where(mapped_state.ne(UNMAPPED), prior_state)
         if states and "state" in summary:
             summary = summary.loc[summary["state"].isin(states)]
-        if "mora_position" in summary:
-            summary["mora_position"] = pd.to_numeric(summary["mora_position"], errors="coerce")
         summary["Call end"] = pd.to_datetime(summary["Call end"], errors="coerce")
         yield summary
 
@@ -577,10 +622,8 @@ def read_detail_summaries(files: tuple[FileSignature, ...], status=None):
 
     for signature in files:
         keys = SUMMARY_KEYS + ["DDI", "phone_prefix"]
-        if is_consolidated_source(Path(signature[0])):
-            keys.append("state")
         if is_crossed_source(Path(signature[0])):
-            keys += ["did", "contact_flag", "mora_position", "source_campaign"]
+            keys += ["did", "contact_flag", "mora_position", "source_campaign", "state"]
         for summary in iter_summary(
             signature, lambda: chunks(signature), status,
             keys=keys,
@@ -607,7 +650,10 @@ def read_outcome_summaries(files: tuple[FileSignature, ...], status=None, filter
 
     for signature in files:
         consolidated = is_consolidated_source(Path(signature[0]))
-        keys = SUMMARY_KEYS + ["state"] if consolidated else SUMMARY_KEYS
+        if consolidated and detail_masters:
+            keys = SUMMARY_KEYS + ["DDI", "phone_prefix", "state"]
+        else:
+            keys = SUMMARY_KEYS + ["state"] if consolidated else SUMMARY_KEYS
         if is_crossed_source(Path(signature[0])):
             keys += ["contact_flag", "mora_position", "source_campaign"]
         for summary in iter_summary(
@@ -615,10 +661,15 @@ def read_outcome_summaries(files: tuple[FileSignature, ...], status=None, filter
             keys=keys, version=OUTCOME_VERSION, namespace=OUTCOME_VERSION,
             batch_size=250_000, date_format="%Y-%m-%d",
         ):
+            if detail_masters and "phone_prefix" in summary:
+                _, ladas = load_detail_masters(*detail_masters)
+                prefixes = summary["phone_prefix"].fillna("").astype(str).map(numeric_code)
+                mapped_state = phone_state(prefixes, ladas)
+                prior_state = summary["state"].fillna(UNMAPPED).astype(str).str.strip().replace("", UNMAPPED)
+                prior_state = prior_state.mask(prior_state.str.casefold().eq("pendiente asignacion"), UNMAPPED)
+                summary["state"] = mapped_state.where(mapped_state.ne(UNMAPPED), prior_state)
             if filters.get("State") and "state" in summary:
                 summary = summary.loc[summary["state"].isin(filters["State"])]
-            if "mora_position" in summary:
-                summary["mora_position"] = pd.to_numeric(summary["mora_position"], errors="coerce")
             summary["Call end"] = pd.to_datetime(summary["Call end"], errors="coerce")
             yield summary
 
@@ -701,10 +752,13 @@ def selected_mask(chunk: pd.DataFrame, filters: dict) -> pd.Series:
         mask &= dates.dt.month.eq(filters["month"])
     if filters.get("State"):
         mask &= chunk["state"].isin(filters["State"])
-    for field in ["Call Type", "Campaign Name", "Term Reason"]:
-        values = filters[field]
+    for field in ["Call Type", "Campaign Name", "source_campaign", "Term Reason"]:
+        values = filters.get(field, [])
         if values:
-            mask &= chunk[field].isin(values)
+            column = "source_campaign" if field == "source_campaign" else field
+            if column == "source_campaign" and column not in chunk:
+                column = "Campaign Name"
+            mask &= chunk[column].isin(values)
     return mask
 
 
@@ -713,12 +767,7 @@ def aggregate_contact_analysis(
     files: tuple[FileSignature, ...], mapping_signature: FileSignature | None, filters: dict,
 ) -> pd.DataFrame:
     outcomes = load_contact_outcomes(mapping_signature) if mapping_signature else None
-    known = None
-    if mapping_signature:
-        mapping = pd.read_excel(mapping_signature[0], usecols=["Call Outcome name"])
-        known = set(mapping["Call Outcome name"].dropna().astype(str).str.strip().str.casefold())
-        if file_signature(Path(mapping_signature[0])) != mapping_signature:
-            raise ValueError("El maestro de contactos cambió durante la lectura. Recarga el dashboard.")
+    known = set(outcomes) if outcomes is not None else None
     parts = []
     dimensions = ["Campaign Name", "Call Type", "Call Outcome name", "mapped"]
     for chunk in read_source_summaries(files, filters=filters):
@@ -852,7 +901,7 @@ def aggregate(
 ) -> dict:
     total = contacts = talk_sum = wrap_sum = wait_sum = 0.0
     by_month, by_day, by_day_of_month, by_weekday, by_hour = [], [], [], [], []
-    by_call_type, by_campaign, by_term = [], [], []
+    by_call_type, by_campaign, by_source_campaign, by_month_campaign, by_campaign_source_mora, by_term = [], [], [], [], [], []
     heat = []
     contact_outcomes = load_contact_outcomes(mapping_signature) if mapping_signature else None
     for chunk in read_source_summaries(files, filters=filters):
@@ -872,7 +921,15 @@ def aggregate(
         talk_sum += chunk["talk_sum"].sum()
         wrap_sum += chunk["wrap_sum"].sum()
         wait_sum += chunk["wait_sum"].sum()
-        for target, keys in [(by_month, ["month"]), (by_day, ["day"]), (by_day_of_month, ["day_of_month"]), (by_weekday, ["weekday"]), (by_hour, ["hour"]), (by_call_type, ["Call Type"]), (by_campaign, ["Campaign Name"]), (by_term, ["Term Reason"]), (heat, ["weekday", "hour"])]:
+        for target, keys in [
+            (by_month, ["month"]), (by_month_campaign, ["month", "source_campaign"]),
+            (by_day, ["day"]), (by_day_of_month, ["day_of_month"]),
+            (by_weekday, ["weekday"]), (by_hour, ["hour"]),
+            (by_call_type, ["Call Type"]), (by_campaign, ["Campaign Name"]),
+            (by_source_campaign, ["source_campaign"]), (by_term, ["Term Reason"]),
+            (by_campaign_source_mora, ["Campaign Name", "source_campaign"]),
+            (heat, ["weekday", "hour"]),
+        ]:
             grouped = chunk.groupby(keys, dropna=False).agg(
                 calls=("calls", "sum"),
                 contacts=("contact", "sum"),
@@ -889,7 +946,10 @@ def aggregate(
     return {
         "total": int(total), "contacts": int(contacts), "talk_sum": talk_sum, "wrap_sum": wrap_sum, "wait_sum": wait_sum,
         "month": combine(by_month), "day": combine(by_day), "day_of_month": combine(by_day_of_month), "weekday": combine(by_weekday), "hour": combine(by_hour), "call_type": combine(by_call_type),
-        "campaign": combine(by_campaign), "term": combine(by_term), "heat": combine(heat),
+        "campaign": combine(by_campaign), "campaign_source": combine(by_source_campaign),
+        "month_campaign": combine(by_month_campaign),
+        "campaign_source_mora": combine(by_campaign_source_mora),
+        "term": combine(by_term), "heat": combine(heat),
     }
 
 
@@ -1186,19 +1246,6 @@ ALL_OPTION = "Todos"
 
 def select_period(date_min, date_max) -> dict:
     st.sidebar.markdown("**Periodo**")
-    if date_min < date_max:
-        start, end = st.sidebar.slider(
-            "Rango de fechas",
-            min_value=date_min,
-            max_value=date_max,
-            value=(date_min, date_max),
-            format="DD/MM/YYYY",
-            key="period-range",
-        )
-    else:
-        st.sidebar.caption(f"Rango de fechas disponible: {date_min:%d/%m/%Y}")
-        start = end = date_min
-
     year_col, month_col = st.sidebar.columns(2)
     years = list(range(date_min.year, date_max.year + 1))
     year = year_col.selectbox("Año", [ALL_OPTION] + years, key="period-year")
@@ -1208,6 +1255,51 @@ def select_period(date_min, date_max) -> dict:
         key="period-month",
         format_func=lambda m: m if m == ALL_OPTION else MONTH_NAMES[m - 1],
     )
+
+    range_min, range_max = date_min, date_max
+    if year != ALL_OPTION:
+        range_min = max(range_min, date(year, 1, 1))
+        range_max = min(range_max, date(year, 12, 31))
+    if month != ALL_OPTION:
+        matching_years = [year] if year != ALL_OPTION else years
+        matching_years = [
+            selected_year for selected_year in matching_years
+            if date(selected_year, month, 1) <= date_max
+            and date(selected_year, month, monthrange(selected_year, month)[1]) >= date_min
+        ]
+        if matching_years:
+            first_year, last_year = matching_years[0], matching_years[-1]
+            month_min = max(date_min, date(first_year, month, 1))
+            month_max = min(
+                date_max, date(last_year, month, monthrange(last_year, month)[1]),
+            )
+            range_min = max(range_min, month_min)
+            range_max = min(range_max, month_max)
+
+    if date_min < date_max and range_min <= range_max:
+        selection = (year, month)
+        previous_selection = st.session_state.get("period-filter-selection")
+        current_range = st.session_state.get("period-range", (range_min, range_max))
+        if selection != previous_selection or not isinstance(current_range, (tuple, list)) or len(current_range) != 2:
+            start, end = range_min, range_max
+        else:
+            start = max(current_range[0], range_min)
+            end = min(current_range[1], range_max)
+            if start > end:
+                start, end = range_min, range_max
+        st.session_state["period-filter-selection"] = selection
+        st.session_state["period-range"] = (start, end)
+        start, end = st.sidebar.slider(
+            "Rango de fechas",
+            min_value=range_min,
+            max_value=range_max,
+            format="DD/MM/YYYY",
+            key="period-range",
+            label_visibility="collapsed",
+        )
+    else:
+        st.sidebar.caption(f"Rango de fechas disponible: {range_min:%d/%m/%Y} - {range_max:%d/%m/%Y}")
+        start, end = range_min, range_max
     return {"start": start, "end": end, "year": year, "month": month}
 
 
@@ -1231,15 +1323,15 @@ def main() -> None:
                 label=f"Drive sincronizado: {len(files)} Parquet y {len(masters)} maestros",
                 state="complete",
             )
-        mapping_signature = masters.get("Mae_contacto.xlsx")
-        if mapping_signature is not None:
-            load_contact_outcomes(mapping_signature)
-        mora_signature = masters.get(MORA_FILE)
-        set_order(load_mora(mora_signature)[1] if mora_signature is not None else {})
-        metadata_signature = (FILTER_VERSION, files, mora_signature)
+        mapping_signature = masters["Mae_contacto.xlsx"]
+        load_contact_outcomes(mapping_signature)
+        mora_signature = masters[MORA_FILE]
+        set_order(load_mora(mora_signature)[1])
+        detail_masters = (masters["Mae_did.xlsx"], masters["Mae_lada.xlsx"])
+        metadata_signature = (FILTER_VERSION, files, mora_signature, detail_masters)
         if st.session_state.get("metadata_signature") != metadata_signature:
             with st.spinner("Preparando la base de datos..."):
-                metadata = dashboard_metadata(files, FILTER_VERSION, mora_signature)
+                metadata = dashboard_metadata(files, FILTER_VERSION, mora_signature, detail_masters)
             st.session_state["source_metadata"] = metadata
             st.session_state["metadata_signature"] = metadata_signature
         else:
@@ -1255,16 +1347,21 @@ def main() -> None:
     set_order(metadata.get("mora_order", {}))
     filters = select_period(date_min, date_max)
     filters["mora_master"] = mora_signature
-    for field, label in [("Call Type", "Call type"), ("Campaign Name", "Altura de mora"), ("Term Reason", "Term reason")]:
-        filters[field] = st.sidebar.multiselect(label, metadata["options"][field], default=[])
-    detail_masters = (masters["Mae_did.xlsx"], masters.get("Mae_lada.xlsx"))
+    for field, label in [
+        ("Call Type", "Call type"),
+        ("Campaign Name", "Altura de mora"),
+        ("source_campaign", "Campaña"),
+        ("Term Reason", "Term reason"),
+    ]:
+        filters[field] = st.sidebar.multiselect(
+            label, metadata["options"][field], default=[], key=field,
+        )
+    filters["detail_masters"] = detail_masters
     state_options = sorted(set(metadata["options"].get("State", [])))
     if not state_options:
         state_options = [UNMAPPED]
     if state_options:
         states = st.sidebar.multiselect("Estado", state_options, default=[])
-        if mora_signature is not None:
-            filters["detail_masters"] = detail_masters
         if states:
             filters["State"] = states
 
