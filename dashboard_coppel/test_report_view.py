@@ -1,3 +1,5 @@
+"""Pruebas de calculos, tablas y graficas del reporte principal."""
+
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -12,6 +14,8 @@ from interactive_table import table_html
 
 
 class ReportViewTests(test_data_loading.DataLoadingTests):
+    """Prueba calculos, graficas, jerarquias y exportaciones del reporte principal."""
+
     def test_date_range_month_and_year_filters_are_independent(self):
         from datetime import date
 
@@ -106,8 +110,9 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
         )
         self.assertEqual(hourly["calls"].sum(), result["total"])
         self.assertEqual(hourly["contacts"].sum(), result["contacts"])
-        self.assertEqual(hourly.loc[hourly["hour"].eq(10), "calls"].iloc[0], 2)
-        self.assertEqual(hourly.loc[hourly["hour"].eq(10), "contacts"].iloc[0], 1)
+        self.assertEqual(hourly.loc[hourly["hour"].eq(8), "calls"].iloc[0], 2)
+        self.assertEqual(hourly.loc[hourly["hour"].eq(8), "contacts"].iloc[0], 1)
+        self.assertEqual(hourly.loc[hourly["hour"].eq(9), "calls"].iloc[0], 1)
         metrics = presentation_metrics(result["month"])
         self.assertAlmostEqual(metrics["rate"].iloc[0], 2 / 3)
         self.assertAlmostEqual(metrics["tmo"].iloc[0], 25 / 3)
@@ -121,6 +126,34 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
         self.assertIn("50.00%", html)
         self.assertIn("100.00%", html)
         self.assertIn('class="no-data"', html)
+
+    def test_mexico_hour_conversion_preserves_date_filters_and_shifts_heatmap_day(self):
+        self.write_csv("calls.csv", [
+            self.row("2026-06-01 01:15:00"),
+            self.row("2026-06-01 10:00:00"),
+        ])
+        result = self.result()
+        hourly = app.contact_hourly_days(
+            app.discover_csv_files(self.root), app.file_signature(self.mapping), self.filters
+        )
+
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["contacts"], 2)
+        self.assertEqual(result["talk_sum"], 0)
+        self.assertEqual(result["day"]["day"].tolist(), ["2026-06-01"])
+        self.assertEqual(result["day_of_month"]["day_of_month"].tolist(), [1])
+        self.assertEqual(
+            result["hour"].set_index("hour")["calls"].to_dict(),
+            {8: 1, 23: 1},
+        )
+        self.assertEqual(
+            result["heat"].set_index(["weekday", "hour"])["calls"].to_dict(),
+            {("Lun", 8): 1, ("Dom", 23): 1},
+        )
+        self.assertEqual(
+            hourly.set_index(["day_of_month", "hour"])["calls"].to_dict(),
+            {(1, 8): 1, (31, 23): 1},
+        )
 
     def test_sortable_tables_preserve_numeric_values_and_literal_campaign_names(self):
         self.write_csv("calls.csv", [self.row("2026-06-01", campaign="<script>alert(1)</script>")])

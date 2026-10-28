@@ -1,3 +1,5 @@
+"""Aplicacion Streamlit: carga fuentes, aplica filtros y coordina vistas del dashboard."""
+
 from pathlib import Path
 from calendar import monthrange
 from datetime import date
@@ -45,6 +47,7 @@ LADA_MAPPING_FILE = DATA_ROOT / "Mae_lada.xlsx"
 LOGO_FILE = Path(__file__).resolve().parent / "assets" / "coppel-logo.png"
 FileSignature = tuple[str, int, int]
 CHUNK_SIZE = 250_000
+COLOMBIA_TO_MEXICO_HOURS = 2
 REQUIRED_COLUMNS = [
     "Call end",
     "Talk Time",
@@ -101,6 +104,7 @@ PPT_TEAL = RGBColor(0, 86, 166)
 PPT_GOLD = RGBColor(246, 196, 0)
 
 
+# Define estilos CSS globales para las paginas y componentes Streamlit.
 def style_dashboard() -> None:
     st.markdown(
         """
@@ -209,6 +213,7 @@ def style_dashboard() -> None:
     )
 
 
+# Presenta el encabezado ejecutivo y los filtros aplicados.
 def render_executive_banner(filters: dict) -> None:
     try:
         logo = b64encode(LOGO_FILE.read_bytes()).decode("ascii")
@@ -232,11 +237,13 @@ def render_executive_banner(filters: dict) -> None:
     )
 
 
+# Construye una firma para detectar cambios en un archivo fuente.
 def file_signature(file_path: Path) -> FileSignature:
     info = file_path.stat()
     return str(file_path.resolve()), info.st_mtime_ns, info.st_size
 
 
+# Descubre archivos CSV locales para pruebas y utilidades internas.
 def discover_csv_files(root: Path) -> tuple[FileSignature, ...]:
     files = sorted(
         (path for path in root.iterdir() if path.is_file() and path.suffix.casefold() == ".csv"),
@@ -247,6 +254,7 @@ def discover_csv_files(root: Path) -> tuple[FileSignature, ...]:
     return tuple(file_signature(path) for path in files)
 
 
+# Descubre Parquet colocados directamente en la raiz indicada.
 def discover_dashboard_files(root: Path) -> tuple[FileSignature, ...]:
     sources = sorted(
         (path for path in root.iterdir() if path.is_file() and path.suffix.casefold() == ".parquet"),
@@ -257,6 +265,7 @@ def discover_dashboard_files(root: Path) -> tuple[FileSignature, ...]:
     return tuple(file_signature(path) for path in sources)
 
 
+# Sincroniza fuentes de Drive y verifica que los Parquet tengan los cruces requeridos.
 def discover_dashboard_sources(
     root: Path,
     status=None,
@@ -274,6 +283,7 @@ def discover_dashboard_sources(
     return sources.parquet, sources.masters
 
 
+# Detecta si un Parquet usa el esquema consolidado.
 def is_consolidated_source(path: Path) -> bool:
     if path.suffix.casefold() != ".parquet":
         return False
@@ -284,6 +294,7 @@ def is_consolidated_source(path: Path) -> bool:
         raise ValueError(f"No se pudo inspeccionar la fuente {path.name}: {exc}") from exc
 
 
+# Verifica que el Parquet consolidado incluya todas las columnas cruzadas.
 def is_crossed_source(path: Path) -> bool:
     if not is_consolidated_source(path):
         return False
@@ -304,6 +315,7 @@ def is_crossed_source(path: Path) -> bool:
         raise ValueError(f"No se pudo inspeccionar la fuente {path.name}: {exc}") from exc
 
 
+# Lee un archivo CSV o Parquet por lotes y normaliza su esquema de origen.
 def read_file_chunks(path: Path, columns: list[str], *, detail: bool):
     batch_size = min(CHUNK_SIZE, 50_000) if detail else CHUNK_SIZE
     if path.suffix.casefold() == ".parquet":
@@ -371,6 +383,7 @@ def read_file_chunks(path: Path, columns: list[str], *, detail: bool):
         raise ValueError(f"Formato de fuente no soportado: {path.suffix}")
 
 
+# Itera por las fuentes verificando sus firmas antes y despues de leerlas.
 def read_source_chunks(files: tuple[FileSignature, ...], status=None, *, detail: bool = False):
     for file_index, (file_path, modified_ns, size) in enumerate(files, start=1):
         path = Path(file_path)
@@ -391,6 +404,7 @@ def read_source_chunks(files: tuple[FileSignature, ...], status=None, *, detail:
             raise ValueError(f"La fuente cambió durante la carga: {path.name}. Actualiza las fuentes.")
 
 
+# Recorre los resumenes para obtener fechas, opciones de filtros y orden de mora.
 def scan_metadata(
     files: tuple[FileSignature, ...], status=None, mora_signature: FileSignature | None = None,
     detail_masters: tuple[FileSignature, FileSignature | None] | None = None,
@@ -434,6 +448,7 @@ def scan_metadata(
 
 
 @st.cache_data(show_spinner="Cargando alturas de mora...")
+# Carga y valida el maestro de mora usando la cache de Streamlit.
 def load_mora(mora_signature: FileSignature) -> tuple[dict[str, str], dict[str, float]]:
     mapping, order = read_mora_master(mora_signature[0])
     if file_signature(Path(mora_signature[0])) != mora_signature:
@@ -441,6 +456,7 @@ def load_mora(mora_signature: FileSignature) -> tuple[dict[str, str], dict[str, 
     return mapping, order
 
 
+# Recalcula la altura de mora desde la campana original y conserva asignaciones previas.
 def apply_mora(chunk: pd.DataFrame, filters: dict) -> pd.DataFrame:
     mora_signature = filters.get("mora_master")
     if mora_signature is None:
@@ -461,6 +477,7 @@ def apply_mora(chunk: pd.DataFrame, filters: dict) -> pd.DataFrame:
     return chunk
 
 
+# Clasifica resultados de llamada y actualiza el conteo de contactos.
 def assign_contact_counts(chunk: pd.DataFrame, outcomes: dict[str, str] | None) -> pd.DataFrame:
     if outcomes is None:
         chunk["contacts"] = pd.to_numeric(chunk["contacts"], errors="coerce").fillna(0)
@@ -483,6 +500,7 @@ def assign_contact_counts(chunk: pd.DataFrame, outcomes: dict[str, str] | None) 
 
 
 @st.cache_data(show_spinner="Cargando clasificación de Contacto/No Contacto...")
+# Carga del maestro el mapeo de resultado a contacto/no contacto.
 def load_contact_outcomes(mapping_signature: FileSignature) -> dict[str, str]:
     file_path, _, _ = mapping_signature
     mapping = pd.read_excel(file_path)
@@ -508,6 +526,7 @@ def load_contact_outcomes(mapping_signature: FileSignature) -> dict[str, str]:
 
 
 @st.cache_data(show_spinner=False)
+# Combina firmas de fuentes y maestros para preparar filtros y datos del dashboard.
 def dashboard_metadata(
     files: tuple[FileSignature, ...], version: str, mora_signature: FileSignature | None = None,
     detail_masters: tuple[FileSignature, FileSignature | None] | None = None,
@@ -515,6 +534,7 @@ def dashboard_metadata(
     return scan_metadata(files, mora_signature=mora_signature, detail_masters=detail_masters)
 
 
+# Normaliza tipos, fechas y valores faltantes de un lote leido.
 def clean_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
     chunk["Call end"] = pd.to_datetime(chunk["Call end"], errors="coerce")
     if "_calls" not in chunk:
@@ -536,6 +556,7 @@ def clean_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
     return chunk
 
 
+# Lee agregados horarios desde cache y aplica cruces opcionales de estado.
 def read_source_summaries(files: tuple[FileSignature, ...], status=None, filters: dict | None = None):
     filters = filters or {}
     states = (filters or {}).get("State")
@@ -582,12 +603,15 @@ def read_source_summaries(files: tuple[FileSignature, ...], status=None, filters
         yield summary
 
 
+# Genera una version de cache asociada al contenido del cruce de ladas.
 def state_version(ladas: dict) -> str:
     digest = hashlib.sha256(json.dumps(sorted(ladas.items())).encode("utf-8")).hexdigest()[:16]
     return f"{STATE_VERSION}-{digest}"
 
 
+# Lee resumenes diarios por estado y calcula el estado desde el telefono.
 def read_state_summaries(files: tuple[FileSignature, ...], ladas: dict, status=None, states=None):
+    # Anexa el estado al lote solo cuando la fuente no lo incluye ya.
     def chunks(signature):
         for raw in read_source_chunks((signature,), status, detail=True):
             chunk = clean_chunk(raw)
@@ -609,7 +633,9 @@ def read_state_summaries(files: tuple[FileSignature, ...], ladas: dict, status=N
             yield summary
 
 
+# Prepara resumenes diarios para los analisis de detalle.
 def read_detail_summaries(files: tuple[FileSignature, ...], status=None):
+    # Conserva las claves necesarias para reclasificar DID, mora y estado.
     def chunks(signature):
         for raw in read_source_chunks((signature,), status, detail=True):
             chunk = clean_chunk(raw)
@@ -633,6 +659,7 @@ def read_detail_summaries(files: tuple[FileSignature, ...], status=None):
             yield summary
 
 
+# Lee resultados diarios de llamada, con estado opcional para filtros.
 def read_outcome_summaries(files: tuple[FileSignature, ...], status=None, filters: dict | None = None):
     filters = filters or {}
     detail_masters = filters.get("detail_masters")
@@ -643,6 +670,7 @@ def read_outcome_summaries(files: tuple[FileSignature, ...], status=None, filter
             yield summary
         return
 
+    # El resumen diario requiere las mismas columnas que se muestran en la pestana.
     def chunks(signature):
         consolidated = is_consolidated_source(Path(signature[0]))
         for raw in read_source_chunks((signature,), status, detail=consolidated):
@@ -674,9 +702,11 @@ def read_outcome_summaries(files: tuple[FileSignature, ...], status=None, filter
             yield summary
 
 
+# Lee resultados diarios agrupados por estado usando el maestro de ladas.
 def read_outcome_state_summaries(
     files: tuple[FileSignature, ...], ladas: dict, status=None, states=None,
 ):
+    # Usa la cache separada por estado para no leer filas completas en cada filtro.
     def chunks(signature):
         for raw in read_source_chunks((signature,), status, detail=True):
             chunk = clean_chunk(raw)
@@ -699,6 +729,7 @@ def read_outcome_state_summaries(
 
 
 @st.cache_data(show_spinner=False, max_entries=2)
+# Construye metricas agrupadas para las vistas de DID, proveedor y estado.
 def aggregate_detail(files: tuple[FileSignature, ...], contact_signature: FileSignature | None,
                      did_signature: FileSignature, lada_signature: FileSignature | None,
                      filters: dict, version: str = DETAIL_VERSION, _status=None) -> dict:
@@ -735,6 +766,7 @@ def aggregate_detail(files: tuple[FileSignature, ...], contact_signature: FileSi
     }
 
 
+# Devuelve la mascara booleana que combina fechas, campanas y demas filtros.
 def selected_mask(chunk: pd.DataFrame, filters: dict) -> pd.Series:
     dates = chunk["Call end"]
     campaign_allowed = ~chunk.get("source_campaign", chunk["Campaign Name"]).str.contains(
@@ -763,6 +795,7 @@ def selected_mask(chunk: pd.DataFrame, filters: dict) -> pd.Series:
 
 
 @st.cache_data(show_spinner=False)
+# Resume resultados para el analisis de contacto y diagnosticos.
 def aggregate_contact_analysis(
     files: tuple[FileSignature, ...], mapping_signature: FileSignature | None, filters: dict,
 ) -> pd.DataFrame:
@@ -787,6 +820,7 @@ def aggregate_contact_analysis(
     return pd.concat(parts).groupby(dimensions, as_index=False)[["calls", "contacts"]].sum()
 
 
+# Lista resultados de llamada que aun no tienen clasificacion en el maestro.
 def unmapped_outcomes(analysis: pd.DataFrame) -> pd.DataFrame:
     columns = ["Call Outcome name", "Contacto / No Contacto", "Llamadas", "Alturas de mora"]
     pending = analysis.loc[~analysis["mapped"].astype(bool)].copy()
@@ -803,6 +837,7 @@ def unmapped_outcomes(analysis: pd.DataFrame) -> pd.DataFrame:
     return grouped.sort_values("Llamadas", ascending=False)[columns].reset_index(drop=True)
 
 
+# Exporta a Excel los resultados que requieren clasificacion.
 def unmapped_outcomes_excel(table: pd.DataFrame) -> bytes:
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -811,6 +846,7 @@ def unmapped_outcomes_excel(table: pd.DataFrame) -> bytes:
 
 
 @st.cache_data(show_spinner=False)
+# Lista campanas originales que siguen sin altura de mora homologada.
 def unmapped_mora_campaigns(
     files: tuple[FileSignature, ...], mora_signature: FileSignature, filters: dict,
 ) -> pd.DataFrame:
@@ -844,6 +880,7 @@ def unmapped_mora_campaigns(
     return result[columns].sort_values(["Llamadas", "Campaña"], ascending=[False, True]).reset_index(drop=True)
 
 
+# Exporta a Excel las campanas pendientes de homologacion de mora.
 def unmapped_mora_campaigns_excel(table: pd.DataFrame) -> bytes:
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -852,6 +889,7 @@ def unmapped_mora_campaigns_excel(table: pd.DataFrame) -> bytes:
 
 
 @st.cache_data(show_spinner=False)
+# Agrega llamadas por resultado, contacto, fecha y dimensiones opcionales.
 def aggregate_outcomes(files: tuple[FileSignature, ...], mapping_signature: FileSignature | None,
                        filters: dict, _status=None) -> pd.DataFrame:
     parts = []
@@ -875,6 +913,7 @@ def aggregate_outcomes(files: tuple[FileSignature, ...], mapping_signature: File
 
 
 @st.cache_data(show_spinner=False)
+# Calcula contactos por dia del mes y hora para el mapa de calor.
 def contact_hourly_days(
     files: tuple[FileSignature, ...], mapping_signature: FileSignature | None, filters: dict,
 ) -> pd.DataFrame:
@@ -885,8 +924,9 @@ def contact_hourly_days(
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
             continue
-        chunk["day_of_month"] = chunk["Call end"].dt.day
-        chunk["hour"] = chunk["Call end"].dt.hour
+        mexico_call_end = chunk["Call end"] - pd.Timedelta(hours=COLOMBIA_TO_MEXICO_HOURS)
+        chunk["day_of_month"] = mexico_call_end.dt.day
+        chunk["hour"] = mexico_call_end.dt.hour
         chunk = assign_contact_counts(chunk, outcomes)
         parts.append(chunk.groupby(["day_of_month", "hour"], as_index=False)[["calls", "contacts"]].sum())
     if not parts:
@@ -895,6 +935,7 @@ def contact_hourly_days(
 
 
 @st.cache_data(show_spinner="Procesando registros seleccionados...")
+# Calcula indicadores y tablas agregadas de la vista principal.
 def aggregate(
     files: tuple[FileSignature, ...], mapping_signature: FileSignature | None,
     filter_version: str, filters: dict,
@@ -912,8 +953,10 @@ def aggregate(
         chunk["month"] = chunk["Call end"].dt.to_period("M").astype(str)
         chunk["day"] = chunk["Call end"].dt.date.astype(str)
         chunk["day_of_month"] = chunk["Call end"].dt.day
-        chunk["hour"] = chunk["Call end"].dt.hour
+        mexico_call_end = chunk["Call end"] - pd.Timedelta(hours=COLOMBIA_TO_MEXICO_HOURS)
+        chunk["hour"] = mexico_call_end.dt.hour
         chunk["weekday"] = chunk["Call end"].dt.day_name().map({"Monday":"Lun", "Tuesday":"Mar", "Wednesday":"Mie", "Thursday":"Jue", "Friday":"Vie", "Saturday":"Sab", "Sunday":"Dom"})
+        chunk["heat_weekday"] = mexico_call_end.dt.day_name().map({"Monday":"Lun", "Tuesday":"Mar", "Wednesday":"Mie", "Thursday":"Jue", "Friday":"Vie", "Saturday":"Sab", "Sunday":"Dom"})
         chunk = assign_contact_counts(chunk, contact_outcomes)
         chunk["contact"] = chunk["contacts"]
         total += chunk["calls"].sum()
@@ -928,7 +971,7 @@ def aggregate(
             (by_call_type, ["Call Type"]), (by_campaign, ["Campaign Name"]),
             (by_source_campaign, ["source_campaign"]), (by_term, ["Term Reason"]),
             (by_campaign_source_mora, ["Campaign Name", "source_campaign"]),
-            (heat, ["weekday", "hour"]),
+            (heat, ["heat_weekday", "hour"]),
         ]:
             grouped = chunk.groupby(keys, dropna=False).agg(
                 calls=("calls", "sum"),
@@ -939,24 +982,28 @@ def aggregate(
             ).reset_index()
             target.append(grouped)
     def combine(parts: list) -> pd.DataFrame:
+        # Reune parciales que pudieron originarse en archivos distintos.
         if not parts:
             return pd.DataFrame()
         keys = [column for column in parts[0].columns if column not in GROUP_METRICS]
         return pd.concat(parts).groupby(keys, as_index=False)[GROUP_METRICS].sum()
+    heat_result = combine(heat).rename(columns={"heat_weekday": "weekday"})
     return {
         "total": int(total), "contacts": int(contacts), "talk_sum": talk_sum, "wrap_sum": wrap_sum, "wait_sum": wait_sum,
         "month": combine(by_month), "day": combine(by_day), "day_of_month": combine(by_day_of_month), "weekday": combine(by_weekday), "hour": combine(by_hour), "call_type": combine(by_call_type),
         "campaign": combine(by_campaign), "campaign_source": combine(by_source_campaign),
         "month_campaign": combine(by_month_campaign),
         "campaign_source_mora": combine(by_campaign_source_mora),
-        "term": combine(by_term), "heat": combine(heat),
+        "term": combine(by_term), "heat": heat_result,
     }
 
 
+# Formatea valores enteros con el separador local del dashboard.
 def fmt_number(value: float) -> str:
     return f"{value:,.0f}".replace(",", ".")
 
 
+# Calcula TMO e inactividad excluyendo llamadas manuales y preview.
 def dialer_kpis(call_types: pd.DataFrame) -> tuple[float | None, float | None]:
     """Idle y TMO de las tarjetas KPI: solo llamadas de marcador; manual y preview/vista previa no se miden."""
     if call_types.empty:
@@ -969,6 +1016,7 @@ def dialer_kpis(call_types: pd.DataFrame) -> tuple[float | None, float | None]:
     return dialer["wait_sum"].sum() / calls, (dialer["talk_sum"].sum() + dialer["wrap_sum"].sum()) / calls
 
 
+# Renderiza una tarjeta visual de indicador principal.
 def render_kpi_card(label: str, value: str, icon: str, gold: bool = False) -> None:
     icons = {
         "calls": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13v-2a8 8 0 0 1 16 0v2"/><rect x="2" y="11" width="5" height="8" rx="2"/><rect x="17" y="11" width="5" height="8" rx="2"/><path d="M20 19v1a2 2 0 0 1-2 2h-4"/></svg>',
@@ -984,6 +1032,7 @@ def render_kpi_card(label: str, value: str, icon: str, gold: bool = False) -> No
     )
 
 
+# Selecciona y prepara las categorias principales para generar hallazgos.
 def insight_dimension(result: dict, total: int, key: str, label: str) -> pd.DataFrame:
     table = result[key].copy()
     if table.empty:
@@ -997,6 +1046,7 @@ def insight_dimension(result: dict, total: int, key: str, label: str) -> pd.Data
     return table
 
 
+# Aplica un formato uniforme a las graficas del dashboard.
 def style_chart(fig, height: int) -> None:
     fig.update_layout(
         template="plotly_white",
@@ -1009,6 +1059,7 @@ def style_chart(fig, height: int) -> None:
     )
 
 
+# Convierte una grafica a PNG para incluirla en la exportacion a PowerPoint.
 def chart_png(fig, width=1400, height=700) -> BytesIO | None:
     try:
         return BytesIO(fig.to_image(format="png", width=width, height=height, scale=1))
@@ -1016,6 +1067,7 @@ def chart_png(fig, width=1400, height=700) -> BytesIO | None:
         return None
 
 
+# Dibuja un icono transparente para las tarjetas del reporte exportado.
 def transparent_icon(kind: str) -> BytesIO:
     image = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -1034,6 +1086,7 @@ def transparent_icon(kind: str) -> BytesIO:
     return output
 
 
+# Agrega texto con formato y alineacion a una diapositiva.
 def ppt_text(slide, text, left, top, width, height, size=18, color=PPT_WHITE, bold=False, align=PP_ALIGN.LEFT):
     box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     frame = box.text_frame
@@ -1055,6 +1108,7 @@ def ppt_text(slide, text, left, top, width, height, size=18, color=PPT_WHITE, bo
     return box
 
 
+# Configura fondo, encabezado y seccion de una diapositiva.
 def ppt_background(slide, title, section=None):
     background = slide.background.fill
     background.solid()
@@ -1069,6 +1123,7 @@ def ppt_background(slide, title, section=None):
         ppt_text(slide, section, 10.0, .68, 2.75, .28, 10, PPT_MUTED, False, PP_ALIGN.RIGHT)
 
 
+# Dibuja una tarjeta de indicador con titulo, valor y color de acento.
 def ppt_card(slide, left, top, width, height, title, value, accent=PPT_TEAL):
     shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(left), Inches(top), Inches(width), Inches(height))
     shape.fill.solid()
@@ -1083,6 +1138,7 @@ def ppt_card(slide, left, top, width, height, title, value, accent=PPT_TEAL):
     ppt_text(slide, value, left + .22, top + .55, width - .4, .5, 25, PPT_WHITE, True)
 
 
+# Prepara recomendaciones ejecutivas a partir de los indicadores principales.
 def insight_records(result, total, tmo, contact_rate):
     tables = [
         insight_dimension(result, total, "campaign", "campaña"),
@@ -1166,6 +1222,7 @@ def insight_records(result, total, tmo, contact_rate):
     return sorted(cards, key=lambda card: {"red": 0, "amber": 1, "green": 2}[card[0]])
 
 
+# Crea una presentacion PowerPoint con indicadores, graficas y hallazgos.
 def build_pptx(result, filters, total, contact_rate, idle, tmo) -> bytes:
     prs = Presentation()
     prs.slide_width = Inches(13.333)
@@ -1244,6 +1301,7 @@ MONTH_NAMES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "
 ALL_OPTION = "Todos"
 
 
+# Recoge fechas y filtros laterales y devuelve la seleccion activa.
 def select_period(date_min, date_max) -> dict:
     st.sidebar.markdown("**Periodo**")
     year_col, month_col = st.sidebar.columns(2)
@@ -1303,6 +1361,7 @@ def select_period(date_min, date_max) -> dict:
     return {"start": start, "end": end, "year": year, "month": month}
 
 
+# Configura la aplicacion, carga fuentes y coordina sus pestanas.
 def main() -> None:
     style_dashboard()
     st.sidebar.markdown("## COPPEL\n### Contact Center Intelligence")
@@ -1435,6 +1494,7 @@ def main() -> None:
                     st.error(f"No se pudo cargar el análisis de contactabilidad: {exc}")
 
 
+# Renderiza indicadores, graficas, tablas y exportaciones de la pestana principal.
 def render_principal(result: dict, files: tuple[FileSignature, ...], mapping_signature: FileSignature | None,
                      filters: dict, total: float, contact_rate: float, tmo: float) -> None:
     try:
@@ -1458,6 +1518,7 @@ def render_principal(result: dict, files: tuple[FileSignature, ...], mapping_sig
             tmo_q25, tmo_q75 = campaign_scatter["tmo"].quantile([.25, .75])
 
             def classify_campaign(row):
+                # Segmenta campanas por cuartiles de contactabilidad y TMO.
                 high_contact = row["contact_rate"] >= contact_q75
                 low_contact = row["contact_rate"] <= contact_q25
                 low_tmo = row["tmo"] <= tmo_q25

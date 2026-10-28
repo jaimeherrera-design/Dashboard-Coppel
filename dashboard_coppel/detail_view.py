@@ -1,3 +1,5 @@
+"""Cruces de detalle DID/estado y componentes visuales de la pestana de detalle."""
+
 from pathlib import Path
 from html import escape
 import re
@@ -19,6 +21,7 @@ UNMAPPED = "Sin cruce"
 
 
 def numeric_code(value: str) -> str:
+    """Normaliza un codigo numerico quitando formato decimal y ceros iniciales."""
     value = str(value).strip()
     if re.fullmatch(r"\d+\.0+", value):
         value = value.split(".")[0]
@@ -28,6 +31,7 @@ def numeric_code(value: str) -> str:
 
 
 def phone_prefix(value: str) -> str:
+    """Extrae la lada de tres digitos de un telefono mexicano de diez digitos."""
     value = re.sub(r"[\s()+-]", "", str(value).strip())
     if re.fullmatch(r"\d+\.0+", value):
         value = value.split(".")[0]
@@ -42,6 +46,7 @@ def phone_prefix(value: str) -> str:
 def load_detail_masters(
     did_signature: FileSignature, lada_signature: FileSignature | None,
 ) -> tuple[pd.DataFrame, dict]:
+    """Valida y carga los maestros DID y lada, comprobando que no cambien al leerlos."""
     did = pd.read_excel(did_signature[0], dtype=str).dropna(how="all")
     did.columns = did.columns.str.strip()
     required_did = ["DDI", "NOMBRE", "HOMOLOGACION"]
@@ -88,10 +93,12 @@ def load_detail_masters(
 
 
 def phone_state(prefix: pd.Series, ladas: dict) -> pd.Series:
+    """Busca el estado por lada de tres digitos y usa dos digitos como respaldo."""
     return prefix.map(ladas).fillna(prefix.str[:2].map(ladas)).fillna(UNMAPPED)
 
 
 def classify_detail(chunk: pd.DataFrame, did: pd.DataFrame, ladas: dict) -> pd.DataFrame:
+    """Cruza cada fila con los maestros y conserva asignaciones previas sin nuevo cruce."""
     chunk = chunk.copy()
     ddi = chunk["DDI"].fillna("").astype(str).map(numeric_code)
     prefix = chunk["phone_prefix"].fillna("").astype(str).map(numeric_code)
@@ -121,15 +128,18 @@ def classify_detail(chunk: pd.DataFrame, did: pd.DataFrame, ladas: dict) -> pd.D
 
 
 def combine_groups(parts: list[pd.DataFrame], dimensions: list[str]) -> pd.DataFrame:
+    """Concatena agregados parciales y vuelve a sumar sus metricas por dimension."""
     if not parts:
         return pd.DataFrame(columns=dimensions + METRICS)
     return pd.concat(parts).groupby(dimensions, as_index=False)[METRICS].sum()
 
 
 def hierarchy_rows(table: pd.DataFrame, dimensions: list[str]) -> pd.DataFrame:
+    """Construye filas padre/hijo para las dimensiones y calcula metricas de presentacion."""
     rows = []
 
     def visit(frame, level, parent):
+        """Agrega un nivel agrupado y desciende recursivamente a sus hijos."""
         grouped = frame.groupby(dimensions[level], as_index=False)[METRICS].sum().sort_values("calls", ascending=False)
         if dimensions[level] == "Campaign Name":
             grouped = sort_by_mora(grouped)
@@ -149,6 +159,7 @@ def hierarchy_rows(table: pd.DataFrame, dimensions: list[str]) -> pd.DataFrame:
 
 
 def detail_table(table: pd.DataFrame, dimensions: list[str], title: str, height: int = 380, performance: bool = True, *, page_size: int = 0) -> None:
+    """Presenta el detalle jerarquico con totales y metricas de rendimiento opcionales."""
     display = hierarchy_rows(table, dimensions)
     display["rate"] *= 100
     columns = [("label", title), ("calls", "Total llamadas"), ("contacts", "Llamadas contactadas"), ("rate", "% Contactabilidad")]
@@ -164,13 +175,14 @@ def detail_table(table: pd.DataFrame, dimensions: list[str], title: str, height:
 
 
 def mora_first(frame: pd.DataFrame) -> pd.DataFrame:
-    """Rows of the altura de mora level always follow the master's Posicion."""
+    """Ordena el nivel de altura de mora segun Posicion en el maestro."""
     if not frame.empty and frame["label"].map(lambda label: position(label)[0] != float("inf")).any():
         return sort_by_mora(frame, "label")
     return frame
 
 
 def select_detail_rows(display: pd.DataFrame, query: str, depth: int, sort_key: str, ascending: bool) -> pd.DataFrame:
+    """Filtra filas coincidentes y ancestros; aplica orden y limita la profundidad."""
     query = query.strip().casefold()
     by_id = display.set_index("_id")
     included = set()
@@ -190,6 +202,7 @@ def select_detail_rows(display: pd.DataFrame, query: str, depth: int, sort_key: 
     identifiers = []
 
     def visit(parent):
+        """Recorre hijos visibles y mantiene el orden jerarquico."""
         if parent not in children:
             return
         for _, row in children[parent].iterrows():
@@ -209,6 +222,7 @@ def select_detail_rows(display: pd.DataFrame, query: str, depth: int, sort_key: 
 
 
 def detail_csv(display: pd.DataFrame, columns: list[tuple[str, str]]) -> bytes:
+    """Exporta las columnas visibles como CSV y neutraliza celdas que ejecutarian formulas."""
     export = display[[key for key, _ in columns]].copy()
     for key in export.select_dtypes(include=["object", "string"]).columns:
         export[key] = export[key].map(
@@ -220,7 +234,9 @@ def detail_csv(display: pd.DataFrame, columns: list[tuple[str, str]]) -> bytes:
 
 def detail_page_html(rows: pd.DataFrame, columns: list[tuple[str, str]],
                      totals: dict, height: int, levels: int) -> str:
+    """Genera la pagina HTML de detalle con filas, subtotales y pie de totales."""
     def cells(row, indent=0):
+        """Formatea celdas de una fila y aplica sangria a las etiquetas."""
         values = []
         for key, _ in columns:
             value = row[key]
@@ -262,6 +278,7 @@ def detail_page_html(rows: pd.DataFrame, columns: list[tuple[str, str]],
 @st.fragment
 def render_detail_page(display: pd.DataFrame, columns: list[tuple[str, str]], title: str,
                        totals: dict, height: int, page_size: int, levels: int) -> None:
+    """Renderiza el detalle con busqueda, orden, profundidad, paginacion y descarga."""
     search_control, depth_control, sort_control, direction_control, page_control = st.columns([3, 1.5, 2, 2, 1])
     with search_control:
         query = st.text_input("Buscar en todo el detalle", key=f"{title}-search")
@@ -294,6 +311,7 @@ def render_detail_page(display: pd.DataFrame, columns: list[tuple[str, str]], ti
 
 
 def did_volume_figure(table: pd.DataFrame) -> go.Figure:
+    """Compara el volumen de llamadas y la contactabilidad para cada DID."""
     table = presentation_metrics(table).sort_values("calls", ascending=False)
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Bar(
@@ -313,6 +331,7 @@ def did_volume_figure(table: pd.DataFrame) -> go.Figure:
 
 
 def state_figure(table: pd.DataFrame, total: dict) -> go.Figure:
+    """Relaciona TMO y contactabilidad por estado, con lineas de promedio general."""
     table = presentation_metrics(table)
     fig = go.Figure(go.Scatter(
         x=table["tmo"], y=table["rate"], mode="markers",
@@ -333,6 +352,7 @@ def state_figure(table: pd.DataFrame, total: dict) -> go.Figure:
 
 
 def render_detail(result: dict, totals: dict) -> None:
+    """Presenta las tablas y graficas de DID, proveedor y estado."""
     if result["did"].empty:
         st.info("No hay llamadas para los filtros seleccionados.")
         return

@@ -142,7 +142,7 @@ La exportacion PDF de recurrencia y su generador independiente fueron retirados.
 
 La vista principal tiene un banner ejecutivo azul con el logo local de Coppel (`assets/coppel-logo.png`) y el periodo activo, acentos amarillos, fondo claro y tarjetas con profundidad. Las tablas conservan sus encabezados azules, resumen mensual y de campanas, graficos en dos columnas y mapas de calor de contactabilidad por hora/dia. El encabezado se adapta a pantallas pequenas y no necesita descargar el logo de internet. Los KPI se muestran en cinco tarjetas: Total llamadas, Contactos, % de contactos, Idle time promedio y TMO. La cantidad y el porcentaje de contactos se presentan por separado, sin cambiar valores, unidades ni formulas. El analisis por campanas sigue disponible; los insights semaforizados ahora estan en la pestana ANALISIS CONTACTABILIDAD.
 
-Los mapas visuales muestran porcentajes de contactos sobre llamadas de cada celda (no cantidades); una celda sin llamadas se muestra como `—`. El detalle por dia del mes y hora se obtiene de los resumenes persistentes, sin releer los CSV. Esto no modifica el calculo de los KPI ni la base usada por el PPT.
+Los mapas visuales muestran porcentajes de contactos sobre llamadas de cada celda (no cantidades); una celda sin llamadas se muestra como `—`. Para las agrupaciones por hora se restan dos horas a `Call end`, que llega en horario de Colombia, para mostrar el horario de operación de Ciudad de México. El ajuste aplica a las horas de los mapas, las gráficas y los insights; también actualiza el día local en los mapas cuando la conversión cruza la medianoche. No cambia los filtros de fecha, los demás agrupados ni el cálculo de los KPI.
 
 Las tablas y graficos debajo de los KPI no tienen bordes exteriores y usan mayor separacion vertical entre bloques. Las tarjetas KPI conservan sus bordes y estilo.
 
@@ -202,6 +202,6 @@ Conserva encabezados azules y texto blanco, barras verdes de volumen en la tabla
 - **Iconos KPI:** auriculares para llamadas, persona con confirmacion para contactos, simbolo porcentual para contactabilidad, pausa para Idle y cronometro para TMO. Son SVG locales decorativos; no cambian los indicadores.
 - **Idle time (tarjeta KPI):** promedio de `Wait Time` solo de llamadas de marcador (`dialer`).
 - **TMO (tarjeta KPI):** (`Talk Time` + `Wrap up time`) / llamadas de marcador. Los tipos `manual` y `preview` / vista previa no se miden en estas dos tarjetas: si el filtro de Call type solo deja esos tipos, muestran **N/A**. Las demas metricas, tablas y graficos no cambian.
-- **Mapa de calor:** contactos agregados por día de semana y hora de `Call end`.
+- **Mapa de calor:** contactos agregados por día de semana y hora local de Ciudad de México (dos horas menos que `Call end`).
 
 Se mantienen excluidas las campanas cuyo nombre contenga `test` o `prueba` y las llamadas sin fecha valida.
