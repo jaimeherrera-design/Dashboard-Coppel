@@ -1,4 +1,7 @@
+"""Pruebas de calculos, tablas y graficas del reporte principal."""
+
 import unittest
+from datetime import date
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -12,6 +15,8 @@ from interactive_table import table_html
 
 
 class ReportViewTests(test_data_loading.DataLoadingTests):
+    """Prueba calculos, graficas, jerarquias y exportaciones del reporte principal."""
+
     def test_date_range_month_and_year_filters_are_independent(self):
         from datetime import date
 
@@ -108,6 +113,7 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
         self.assertEqual(hourly["contacts"].sum(), result["contacts"])
         self.assertEqual(hourly.loc[hourly["hour"].eq(10), "calls"].iloc[0], 2)
         self.assertEqual(hourly.loc[hourly["hour"].eq(10), "contacts"].iloc[0], 1)
+        self.assertEqual(hourly.loc[hourly["hour"].eq(11), "calls"].iloc[0], 1)
         metrics = presentation_metrics(result["month"])
         self.assertAlmostEqual(metrics["rate"].iloc[0], 2 / 3)
         self.assertAlmostEqual(metrics["tmo"].iloc[0], 25 / 3)
@@ -121,6 +127,65 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
         self.assertIn("50.00%", html)
         self.assertIn("100.00%", html)
         self.assertIn('class="no-data"', html)
+
+    def test_hourly_views_preserve_source_dates_and_hours(self):
+        self.write_csv("calls.csv", [
+            self.row("2026-06-01 01:15:00"),
+            self.row("2026-06-01 10:00:00"),
+        ])
+        result = self.result()
+        hourly = app.contact_hourly_days(
+            app.discover_csv_files(self.root), app.file_signature(self.mapping), self.filters
+        )
+
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["contacts"], 2)
+        self.assertEqual(result["talk_sum"], 0)
+        self.assertEqual(result["day"]["day"].tolist(), ["2026-06-01"])
+        self.assertEqual(result["day_of_month"]["day_of_month"].tolist(), [1])
+        self.assertEqual(
+            result["hour"].set_index("hour")["calls"].to_dict(),
+            {1: 1, 10: 1},
+        )
+        self.assertEqual(
+            result["heat"].set_index(["weekday", "hour"])["calls"].to_dict(),
+            {("Lun", 1): 1, ("Lun", 10): 1},
+        )
+        self.assertEqual(
+            hourly.set_index(["day_of_month", "hour"])["calls"].to_dict(),
+            {(1, 1): 1, (1, 10): 1},
+        )
+
+    def test_los_angeles_to_mexico_conversion_follows_dst_by_date(self):
+        source = pd.Series(pd.to_datetime([
+            "2026-01-15 13:00:00",
+            "2026-07-15 13:00:00",
+            "2026-11-15 13:00:00",
+        ]))
+        converted = app.display_call_end(source, {"time_mode": app.TIME_MODE_MEXICO})
+        self.assertEqual(
+            converted.dt.strftime("%Y-%m-%d %H:%M").tolist(),
+            ["2026-01-15 15:00", "2026-07-15 14:00", "2026-11-15 15:00"],
+        )
+
+    def test_timezone_summary_sums_call_counts_from_source(self):
+        source = pd.DataFrame({
+            "Call end": pd.to_datetime(["2026-06-01 13:00:00", "2026-06-01 14:00:00"]),
+            "Campaign Name": ["Cobranza", "Cobranza"],
+            "source_campaign": ["Cobranza", "Cobranza"],
+            "calls": [4, 6],
+        })
+        filters = {
+            "start": date(2026, 6, 1),
+            "end": date(2026, 6, 1),
+            "Call Type": [],
+            "Campaign Name": [],
+            "Term Reason": [],
+        }
+        app.timezone_conversion_summary.clear()
+        with patch.object(app, "read_source_summaries", return_value=iter([source])):
+            summary = app.timezone_conversion_summary(("source", 1, 1), filters)
+        self.assertEqual(summary["llamadas"].sum(), 10)
 
     def test_sortable_tables_preserve_numeric_values_and_literal_campaign_names(self):
         self.write_csv("calls.csv", [self.row("2026-06-01", campaign="<script>alert(1)</script>")])
@@ -164,6 +229,49 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
             self.assertEqual(totals["rate"], 50)
             self.assertEqual(totals["tmo"], 7)
             self.assertEqual(totals["idle"], 2)
+
+    def test_raw_campaign_filter_and_first_tables_use_source_campaign(self):
+        self.write_csv("calls.csv", [
+            self.row("2026-06-01", campaign="Campaña original A"),
+            self.row("2026-06-02", campaign="Campaña original B", outcome="Busy"),
+        ])
+        chunk = pd.DataFrame({
+            "Call end": pd.to_datetime(["2026-06-01", "2026-06-02"]),
+            "Campaign Name": ["MORA 1", "MORA 1"],
+            "source_campaign": ["Campaña original A", "Campaña original B"],
+            "Call Type": ["Outbound", "Outbound"],
+            "Term Reason": ["Completed", "Completed"],
+        })
+        selected = {**self.filters, "source_campaign": ["Campaña original B"]}
+        self.assertEqual(
+            chunk.loc[app.selected_mask(chunk, selected), "source_campaign"].tolist(),
+            ["Campaña original B"],
+        )
+
+        result = self.result()
+        self.filters["source_campaign"] = ["Campaña original B"]
+        filtered_result = self.result()
+        self.assertEqual(filtered_result["total"], 1)
+        self.assertEqual(filtered_result["campaign_source"]["source_campaign"].tolist(), ["Campaña original B"])
+        with patch("report_view.render_interactive_table") as rendered, patch("report_view.st.markdown"), \
+             patch("report_view.st.plotly_chart"), patch("report_view.st.caption"):
+            render_report(
+                result,
+                pd.DataFrame(columns=["day_of_month", "hour", "calls", "contacts"]),
+            )
+        first_table = rendered.call_args_list[0].args[0]
+        second_table = rendered.call_args_list[1].args[0]
+        self.assertEqual(list(rendered.call_args_list[0].args[1])[0], ("label", "Año · Mes"))
+        self.assertEqual(list(rendered.call_args_list[1].args[1])[0], ("label", "Altura de mora"))
+        self.assertTrue(rendered.call_args_list[0].kwargs["hierarchy"])
+        self.assertTrue(rendered.call_args_list[1].kwargs["hierarchy"])
+        self.assertFalse(rendered.call_args_list[0].kwargs["expanded_by_default"])
+        self.assertFalse(rendered.call_args_list[1].kwargs["expanded_by_default"])
+        self.assertEqual(first_table.loc[first_table["_depth"].eq(0), "label"].tolist(), ["2026-06"])
+        self.assertEqual(
+            set(second_table.loc[second_table["_depth"].eq(1), "label"]),
+            {"Campaña original A", "Campaña original B"},
+        )
 
     def test_rate_lines_are_taller_and_leave_room_for_labels(self):
         table = pd.DataFrame({
@@ -232,6 +340,7 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
             ui = AppTest.from_string("import app\napp.main()", default_timeout=30).run()
         self.assertFalse(ui.exception)
         self.assertFalse(ui.error)
+        self.assertEqual(ui.multiselect(key="source_campaign").label, "Campaña")
         banners = [element.value for element in ui.markdown if '<header class="executive-banner">' in element.value]
         self.assertEqual(len(banners), 1)
         self.assertIn('alt="Coppel"', banners[0])

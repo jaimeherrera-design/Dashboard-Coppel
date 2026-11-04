@@ -1,5 +1,12 @@
 # Dashboard Coppel
 
+El panel de filtros permite alternar entre la hora original (Los Ángeles) y la
+hora de México DF. La conversión usa las zonas horarias oficiales
+`America/Los_Angeles` y `America/Mexico_City`, aplicando automáticamente +2
+horas en horario estándar de Los Ángeles y +1 hora en horario de verano. La
+pestaña de análisis muestra el detalle mensual de la conversión y conserva
+intacta la hora original de la fuente.
+
 Dashboard ejecutivo de Contact Center conectado exclusivamente a los archivos `.parquet`
 directamente en la carpeta privada de Google Drive `1VotCf0HuDIGbmkM88KYAQSZQRI0du-zB`.
 Suma todos los Parquet de esa carpeta al abrir, recargar o cambiar filtros. La lista se consulta
@@ -18,9 +25,11 @@ El campo `conteo_registros` se usa como cantidad de llamadas; `Talk Time`, `Wait
 `Wrap up time` contienen las sumas por grupo. No se usa `Total Calls` como contador.
 `DDI sin homologar`, `NIR 3 digitos sin homologar`, `Campaign Name sin homologar` y
 `Call Outcome name sin homologar` se vuelven a cruzar con los cuatro maestros de Drive.
-Cuando una clave coincide, prevalece la asignacion del maestro actualizado; las asignaciones
-existentes se conservan si no hay clave de origen o coincidencia nueva, y los pendientes
-siguen pendientes. No se reemplazan los Parquet.
+Cuando una clave coincide, prevalece la asignacion del maestro actualizado. Si falta el DDI
+original, se recupera el codigo numerico inicial de la homologacion previa (por ejemplo,
+`6675302853-PENDIENTE`) y se reintenta el cruce del DID y proveedor con el maestro vigente.
+Las asignaciones previas se conservan si no hay una clave recuperable o coincidencia nueva;
+en esos casos, los pendientes siguen pendientes. No se reemplazan los Parquet.
 Los registros `Pendiente asignacion` se conservan en el total de llamadas, no se cuentan como
 contactos y aparecen como pendientes/sin clasificacion; una altura o posicion de mora pendiente
 se conserva y queda al final del orden, no bloquea la carga. Se requieren los cuatro maestros:
@@ -30,6 +39,10 @@ En el panel lateral, el rango se elige directamente con una barra de fechas. Los
 **Mes** y **Año** están disponibles de forma independiente: se puede filtrar un mes sin elegir
 primero el año, o escoger un rango/fecha puntual sin pasar por esos selectores. Si se combinan,
 los criterios se aplican simultaneamente.
+El selector **Campaña** filtra por el nombre original sin homologar. Las dos primeras tablas
+del dashboard principal conservan sus agrupaciones originales (**Año · Mes** y **Altura de
+mora**) y permiten expandir cada fila para ver las campañas originales asociadas. La altura
+de mora homologada se conserva como filtro y para el resto de los análisis.
 
 Ver [configuracion privada local](../README.md#Acceso-privado-local-a-Drive).
 En Cloud la credencial se carga de `[gcp_service_account]` en Secrets de Streamlit.
@@ -136,7 +149,7 @@ La exportacion PDF de recurrencia y su generador independiente fueron retirados.
 
 La vista principal tiene un banner ejecutivo azul con el logo local de Coppel (`assets/coppel-logo.png`) y el periodo activo, acentos amarillos, fondo claro y tarjetas con profundidad. Las tablas conservan sus encabezados azules, resumen mensual y de campanas, graficos en dos columnas y mapas de calor de contactabilidad por hora/dia. El encabezado se adapta a pantallas pequenas y no necesita descargar el logo de internet. Los KPI se muestran en cinco tarjetas: Total llamadas, Contactos, % de contactos, Idle time promedio y TMO. La cantidad y el porcentaje de contactos se presentan por separado, sin cambiar valores, unidades ni formulas. El analisis por campanas sigue disponible; los insights semaforizados ahora estan en la pestana ANALISIS CONTACTABILIDAD.
 
-Los mapas visuales muestran porcentajes de contactos sobre llamadas de cada celda (no cantidades); una celda sin llamadas se muestra como `—`. El detalle por dia del mes y hora se obtiene de los resumenes persistentes, sin releer los CSV. Esto no modifica el calculo de los KPI ni la base usada por el PPT.
+Los mapas visuales muestran porcentajes de contactos sobre llamadas de cada celda (no cantidades); una celda sin llamadas se muestra como `—`. Para las agrupaciones por hora se restan dos horas a `Call end`, que llega en horario de Colombia, para mostrar el horario de operación de Ciudad de México. El ajuste aplica a las horas de los mapas, las gráficas y los insights; también actualiza el día local en los mapas cuando la conversión cruza la medianoche. No cambia los filtros de fecha, los demás agrupados ni el cálculo de los KPI.
 
 Las tablas y graficos debajo de los KPI no tienen bordes exteriores y usan mayor separacion vertical entre bloques. Las tarjetas KPI conservan sus bordes y estilo.
 
@@ -157,6 +170,7 @@ El grafico de campanas ocupa el ancho completo y compara dos paneles alineados p
 - Muestra llamadas y contactabilidad por DID, y un diagrama TMO/contactabilidad por estado con lineas de referencia del promedio ponderado de las llamadas filtradas.
 - El diagrama por estado muestra los nombres y metricas al pasar el cursor sobre cada punto, sin etiquetas permanentes superpuestas.
 - `Mae_did.xlsx`, en Drive, debe contener `DDI`, `NOMBRE` y `HOMOLOGACION`. El DDI original se vuelve a cruzar, ignorando ceros iniciales (por ejemplo, `0056` y `56`), para completar la homologacion y el proveedor.
+- Si el DDI original esta vacio, se reintenta el cruce desde el codigo al inicio de la homologacion previa cuando ese DDI existe en el maestro; esto actualiza, por ejemplo, `6675302853-PENDIENTE` a la homologacion vigente.
 - `Mae_lada.xlsx` reclasifica el estado desde el NIR original; `Mae_contacto.xlsx` reclasifica cada resultado de llamada y `Mae_Mora.xlsx` asigna altura y posicion desde la campaña original. Un valor nuevo sin coincidencia permanece sin cruce/asignacion.
 - Si falta cualquiera de los maestros, esta bloqueado, incompleto o tiene claves contradictorias, se muestra un error sin presentar totales calculados con cruces parciales.
 - La primera carga prepara resumenes adicionales por Parquet con las dimensiones ya cruzadas. No reemplaza los resumenes principales ni modifica las fuentes. Despues utiliza la cache persistente y solo prepara fuentes nuevas o modificadas.
@@ -195,6 +209,14 @@ Conserva encabezados azules y texto blanco, barras verdes de volumen en la tabla
 - **Iconos KPI:** auriculares para llamadas, persona con confirmacion para contactos, simbolo porcentual para contactabilidad, pausa para Idle y cronometro para TMO. Son SVG locales decorativos; no cambian los indicadores.
 - **Idle time (tarjeta KPI):** promedio de `Wait Time` solo de llamadas de marcador (`dialer`).
 - **TMO (tarjeta KPI):** (`Talk Time` + `Wrap up time`) / llamadas de marcador. Los tipos `manual` y `preview` / vista previa no se miden en estas dos tarjetas: si el filtro de Call type solo deja esos tipos, muestran **N/A**. Las demas metricas, tablas y graficos no cambian.
-- **Mapa de calor:** contactos agregados por día de semana y hora de `Call end`.
+- **Mapa de calor:** contactos agregados por día de semana y hora local de Ciudad de México (dos horas menos que `Call end`).
 
 Se mantienen excluidas las campanas cuyo nombre contenga `test` o `prueba` y las llamadas sin fecha valida.
+# Dashboard Coppel
+
+La aplicación permite alternar en el panel de filtros entre la hora original
+(Los Ángeles) y la hora de México DF. La conversión usa las zonas horarias
+oficiales `America/Los_Angeles` y `America/Mexico_City`, por lo que aplica
+automáticamente +2 horas cuando Los Ángeles está en horario estándar y +1 hora
+cuando está en horario de verano. La pestaña de análisis muestra el detalle
+mensual de la conversión y conserva intacta la hora original de la fuente.
