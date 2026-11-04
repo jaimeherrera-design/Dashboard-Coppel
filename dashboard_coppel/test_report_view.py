@@ -1,6 +1,7 @@
 """Pruebas de calculos, tablas y graficas del reporte principal."""
 
 import unittest
+from datetime import date
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -166,6 +167,25 @@ class ReportViewTests(test_data_loading.DataLoadingTests):
             converted.dt.strftime("%Y-%m-%d %H:%M").tolist(),
             ["2026-01-15 15:00", "2026-07-15 14:00", "2026-11-15 15:00"],
         )
+
+    def test_timezone_summary_sums_call_counts_from_source(self):
+        source = pd.DataFrame({
+            "Call end": pd.to_datetime(["2026-06-01 13:00:00", "2026-06-01 14:00:00"]),
+            "Campaign Name": ["Cobranza", "Cobranza"],
+            "source_campaign": ["Cobranza", "Cobranza"],
+            "calls": [4, 6],
+        })
+        filters = {
+            "start": date(2026, 6, 1),
+            "end": date(2026, 6, 1),
+            "Call Type": [],
+            "Campaign Name": [],
+            "Term Reason": [],
+        }
+        app.timezone_conversion_summary.clear()
+        with patch.object(app, "read_source_summaries", return_value=iter([source])):
+            summary = app.timezone_conversion_summary(("source", 1, 1), filters)
+        self.assertEqual(summary["llamadas"].sum(), 10)
 
     def test_sortable_tables_preserve_numeric_values_and_literal_campaign_names(self):
         self.write_csv("calls.csv", [self.row("2026-06-01", campaign="<script>alert(1)</script>")])

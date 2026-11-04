@@ -827,7 +827,7 @@ def timezone_conversion_summary(
             "mes": original.dt.to_period("M").astype(str),
             "mes_mexico": converted.dt.to_period("M").astype(str),
             "diferencia_horas": (converted - original).dt.total_seconds() / 3600,
-            "llamadas": 1,
+            "llamadas": chunk["calls"],
         })
         parts.append(part)
     if not parts:
