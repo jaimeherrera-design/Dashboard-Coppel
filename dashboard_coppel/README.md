@@ -1,5 +1,12 @@
 # Dashboard Coppel
 
+El panel de filtros permite alternar entre la hora original (Los Ángeles) y la
+hora de México DF. La conversión usa las zonas horarias oficiales
+`America/Los_Angeles` y `America/Mexico_City`, aplicando automáticamente +2
+horas en horario estándar de Los Ángeles y +1 hora en horario de verano. La
+pestaña de análisis muestra el detalle mensual de la conversión y conserva
+intacta la hora original de la fuente.
+
 Dashboard ejecutivo de Contact Center conectado exclusivamente a los archivos `.parquet`
 directamente en la carpeta privada de Google Drive `1VotCf0HuDIGbmkM88KYAQSZQRI0du-zB`.
 Suma todos los Parquet de esa carpeta al abrir, recargar o cambiar filtros. La lista se consulta
@@ -205,3 +212,11 @@ Conserva encabezados azules y texto blanco, barras verdes de volumen en la tabla
 - **Mapa de calor:** contactos agregados por día de semana y hora local de Ciudad de México (dos horas menos que `Call end`).
 
 Se mantienen excluidas las campanas cuyo nombre contenga `test` o `prueba` y las llamadas sin fecha valida.
+# Dashboard Coppel
+
+La aplicación permite alternar en el panel de filtros entre la hora original
+(Los Ángeles) y la hora de México DF. La conversión usa las zonas horarias
+oficiales `America/Los_Angeles` y `America/Mexico_City`, por lo que aplica
+automáticamente +2 horas cuando Los Ángeles está en horario estándar y +1 hora
+cuando está en horario de verano. La pestaña de análisis muestra el detalle
+mensual de la conversión y conserva intacta la hora original de la fuente.

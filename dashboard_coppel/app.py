@@ -10,6 +10,7 @@ from zipfile import BadZipFile
 import hashlib
 import json
 import sqlite3
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pyarrow as pa
@@ -47,7 +48,10 @@ LADA_MAPPING_FILE = DATA_ROOT / "Mae_lada.xlsx"
 LOGO_FILE = Path(__file__).resolve().parent / "assets" / "coppel-logo.png"
 FileSignature = tuple[str, int, int]
 CHUNK_SIZE = 250_000
-COLOMBIA_TO_MEXICO_HOURS = 2
+SOURCE_TIMEZONE = "America/Los_Angeles"
+DISPLAY_TIMEZONE = "America/Mexico_City"
+TIME_MODE_ORIGINAL = "original"
+TIME_MODE_MEXICO = "mexico"
 REQUIRED_COLUMNS = [
     "Call end",
     "Talk Time",
@@ -749,6 +753,7 @@ def aggregate_detail(files: tuple[FileSignature, ...], contact_signature: FileSi
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
             continue
+        chunk["analysis_call_end"] = display_call_end(chunk["Call end"], filters)
         chunk = assign_contact_counts(chunk, outcomes)
         chunk = classify_detail(chunk, did, ladas)
         if filters.get("State"):
@@ -768,7 +773,7 @@ def aggregate_detail(files: tuple[FileSignature, ...], contact_signature: FileSi
 
 # Devuelve la mascara booleana que combina fechas, campanas y demas filtros.
 def selected_mask(chunk: pd.DataFrame, filters: dict) -> pd.Series:
-    dates = chunk["Call end"]
+    dates = display_call_end(chunk["Call end"], filters)
     campaign_allowed = ~chunk.get("source_campaign", chunk["Campaign Name"]).str.contains(
         EXCLUDED_CAMPAIGN_PATTERN, case=False, na=False
     )
@@ -792,6 +797,81 @@ def selected_mask(chunk: pd.DataFrame, filters: dict) -> pd.Series:
                 column = "Campaign Name"
             mask &= chunk[column].isin(values)
     return mask
+
+
+def display_call_end(dates: pd.Series, filters: dict) -> pd.Series:
+    """Devuelve Call end en la zona elegida para el análisis."""
+    if filters.get("time_mode", TIME_MODE_ORIGINAL) != TIME_MODE_MEXICO:
+        return dates
+    localized = dates.dt.tz_localize(
+        ZoneInfo(SOURCE_TIMEZONE), ambiguous=False, nonexistent="shift_forward",
+    )
+    return localized.dt.tz_convert(ZoneInfo(DISPLAY_TIMEZONE)).dt.tz_localize(None)
+
+
+@st.cache_data(show_spinner=False)
+def timezone_conversion_summary(
+    files: tuple[FileSignature, ...], filters: dict,
+) -> pd.DataFrame:
+    """Resume por mes el desplazamiento aplicado de Los Angeles a México DF."""
+    parts = []
+    summary_filters = {**filters, "time_mode": TIME_MODE_ORIGINAL}
+    for chunk in read_source_summaries(files, filters=summary_filters):
+        chunk = apply_mora(chunk, summary_filters)
+        chunk = chunk.loc[selected_mask(chunk, summary_filters)].copy()
+        if chunk.empty:
+            continue
+        original = chunk["Call end"]
+        converted = display_call_end(original, {"time_mode": TIME_MODE_MEXICO})
+        part = pd.DataFrame({
+            "mes": original.dt.to_period("M").astype(str),
+            "mes_mexico": converted.dt.to_period("M").astype(str),
+            "diferencia_horas": (converted - original).dt.total_seconds() / 3600,
+            "llamadas": 1,
+        })
+        parts.append(part)
+    if not parts:
+        return pd.DataFrame(columns=["mes", "mes_mexico", "diferencia_horas", "llamadas"])
+    result = pd.concat(parts, ignore_index=True)
+    return (
+        result.groupby(["mes", "mes_mexico", "diferencia_horas"], as_index=False)["llamadas"]
+        .sum()
+        .sort_values(["mes", "diferencia_horas"])
+    )
+
+
+def render_timezone_insight(files: tuple[FileSignature, ...], filters: dict) -> None:
+    summary = timezone_conversion_summary(files, filters)
+    st.markdown("### Conversión horaria aplicada")
+    st.info(
+        "La data original se interpreta como hora local de Los Ángeles y se convierte "
+        "a hora de México DF usando las zonas horarias oficiales. El desfase cambia "
+        "automáticamente cuando Los Ángeles entra o sale del horario de verano; México "
+        "DF permanece en UTC-6."
+    )
+    if summary.empty:
+        st.caption("No hay llamadas para mostrar el detalle mensual de la conversión.")
+        return
+    display = summary.rename(columns={
+        "mes": "Mes original (LA)",
+        "mes_mexico": "Mes en México DF",
+        "diferencia_horas": "Diferencia",
+        "llamadas": "Llamadas",
+    }).copy()
+    display["Diferencia"] = display["Diferencia"].map(lambda value: f"+{value:g} h")
+    display["Mes original (LA)"] = display["Mes original (LA)"].map(
+        lambda value: f"{MONTH_NAMES[int(value[5:7]) - 1]} {value[:4]}"
+    )
+    display["Mes en México DF"] = display["Mes en México DF"].map(
+        lambda value: f"{MONTH_NAMES[int(value[5:7]) - 1]} {value[:4]}"
+    )
+    st.dataframe(display, hide_index=True, use_container_width=True)
+    mode = filters.get("time_mode", TIME_MODE_ORIGINAL)
+    selected_label = "México DF" if mode == TIME_MODE_MEXICO else "original de Los Ángeles"
+    st.caption(
+        f"Vista activa: {selected_label}. El selector del panel lateral permite alternar "
+        "sin modificar la hora guardada en la fuente."
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -905,8 +985,9 @@ def aggregate_outcomes(files: tuple[FileSignature, ...], mapping_signature: File
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
             continue
-        chunk["month"] = chunk["Call end"].dt.to_period("M").astype(str)
-        chunk["date"] = chunk["Call end"].dt.strftime("%Y-%m-%d")
+        chunk["analysis_call_end"] = display_call_end(chunk["Call end"], filters)
+        chunk["month"] = chunk["analysis_call_end"].dt.to_period("M").astype(str)
+        chunk["date"] = chunk["analysis_call_end"].dt.strftime("%Y-%m-%d")
         chunk = assign_contact_counts(chunk, outcomes)
         parts.append(chunk.groupby(dimensions, as_index=False)[GROUP_METRICS].sum())
     return combine_groups(parts, dimensions)
@@ -924,9 +1005,9 @@ def contact_hourly_days(
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
             continue
-        mexico_call_end = chunk["Call end"] - pd.Timedelta(hours=COLOMBIA_TO_MEXICO_HOURS)
-        chunk["day_of_month"] = mexico_call_end.dt.day
-        chunk["hour"] = mexico_call_end.dt.hour
+        chunk["analysis_call_end"] = display_call_end(chunk["Call end"], filters)
+        chunk["day_of_month"] = chunk["analysis_call_end"].dt.day
+        chunk["hour"] = chunk["analysis_call_end"].dt.hour
         chunk = assign_contact_counts(chunk, outcomes)
         parts.append(chunk.groupby(["day_of_month", "hour"], as_index=False)[["calls", "contacts"]].sum())
     if not parts:
@@ -950,13 +1031,13 @@ def aggregate(
         chunk = chunk.loc[selected_mask(chunk, filters)].copy()
         if chunk.empty:
             continue
-        chunk["month"] = chunk["Call end"].dt.to_period("M").astype(str)
-        chunk["day"] = chunk["Call end"].dt.date.astype(str)
-        chunk["day_of_month"] = chunk["Call end"].dt.day
-        mexico_call_end = chunk["Call end"] - pd.Timedelta(hours=COLOMBIA_TO_MEXICO_HOURS)
-        chunk["hour"] = mexico_call_end.dt.hour
-        chunk["weekday"] = chunk["Call end"].dt.day_name().map({"Monday":"Lun", "Tuesday":"Mar", "Wednesday":"Mie", "Thursday":"Jue", "Friday":"Vie", "Saturday":"Sab", "Sunday":"Dom"})
-        chunk["heat_weekday"] = mexico_call_end.dt.day_name().map({"Monday":"Lun", "Tuesday":"Mar", "Wednesday":"Mie", "Thursday":"Jue", "Friday":"Vie", "Saturday":"Sab", "Sunday":"Dom"})
+        chunk["analysis_call_end"] = display_call_end(chunk["Call end"], filters)
+        chunk["month"] = chunk["analysis_call_end"].dt.to_period("M").astype(str)
+        chunk["day"] = chunk["analysis_call_end"].dt.date.astype(str)
+        chunk["day_of_month"] = chunk["analysis_call_end"].dt.day
+        chunk["hour"] = chunk["analysis_call_end"].dt.hour
+        chunk["weekday"] = chunk["analysis_call_end"].dt.day_name().map({"Monday":"Lun", "Tuesday":"Mar", "Wednesday":"Mie", "Thursday":"Jue", "Friday":"Vie", "Saturday":"Sab", "Sunday":"Dom"})
+        chunk["heat_weekday"] = chunk["analysis_call_end"].dt.day_name().map({"Monday":"Lun", "Tuesday":"Mar", "Wednesday":"Mie", "Thursday":"Jue", "Friday":"Vie", "Saturday":"Sab", "Sunday":"Dom"})
         chunk = assign_contact_counts(chunk, contact_outcomes)
         chunk["contact"] = chunk["contacts"]
         total += chunk["calls"].sum()
@@ -1423,6 +1504,15 @@ def main() -> None:
         states = st.sidebar.multiselect("Estado", state_options, default=[])
         if states:
             filters["State"] = states
+    time_mode = st.sidebar.radio(
+        "Zona horaria para el análisis",
+        ["Hora México DF", "Hora original (Los Ángeles)"],
+        index=0,
+        key="time-mode",
+    )
+    filters["time_mode"] = (
+        TIME_MODE_MEXICO if time_mode == "Hora México DF" else TIME_MODE_ORIGINAL
+    )
 
     try:
         result = aggregate(files, mapping_signature, FILTER_VERSION, filters)
@@ -1490,6 +1580,7 @@ def main() -> None:
                     with st.spinner("Analizando volumen, clasificación y resultados de llamada..."):
                         analysis_result = aggregate_contact_analysis(files, mapping_signature, filters)
                     render_contact_analysis(analysis_result, result)
+                    render_timezone_insight(files, filters)
                 except (OSError, ValueError, ImportError, BadZipFile, sqlite3.Error, pd.errors.DatabaseError) as exc:
                     st.error(f"No se pudo cargar el análisis de contactabilidad: {exc}")
 
